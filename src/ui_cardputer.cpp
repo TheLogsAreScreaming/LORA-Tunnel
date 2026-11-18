@@ -223,11 +223,6 @@ void drawMessages(const ui::Model& m) {
   auto& s=messageState;header(ui::messages::title(s));
   ui::messages::refreshRecord(s,m);
   char text[80];
-  const auto contactView=s.screen==Screen::Contact||s.screen==Screen::Trust;
-  if(contactView && m.messages.contacts && s.selected<std::min(unsigned(m.messages.contact_count),8U)) {
-    const auto& current=m.messages.contacts[s.selected];
-    if(current.node==s.contact.node && current.protocol==s.contact.protocol)s.contact=current;
-  }
   if(s.screen==Screen::Identity) {
     label(m.messages.name,4,26,GREEN,38);label(m.messages.channel,4,39,CYAN,38);
     label(m.profile,4,52,WHITE,38);

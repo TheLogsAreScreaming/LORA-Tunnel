@@ -502,10 +502,6 @@ void messageScreen(const ui::Model& m) {
   gfx().fillRect(0,47,FRAME_WIDTH,227,BG);
   char text[80];
   if(s.screen==Screen::Contact||s.screen==Screen::Trust) {
-    if(m.messages.contacts && s.selected<std::min(unsigned(m.messages.contact_count),8U)) {
-      const auto& current=m.messages.contacts[s.selected];
-      if(current.node==s.contact.node && current.protocol==s.contact.protocol)s.contact=current;
-    }
     snprintf(text,sizeof(text),"%.25s !%08lX",s.contact.name,(unsigned long)s.contact.node);label(text,9,50,CYAN,1,37);
     label(ui::messages::protocolName(s.contact.protocol),9,64,MUTED,1,37);
     char key[65];ui::messages::fingerprint(s.contact,key);

@@ -18,6 +18,7 @@ struct State {
   unsigned selected=0, setting=0;
   int target=-1;
   bool composing=false;
+  bool contact_stale=false;
   Protocol pending_protocol=Protocol::Unknown;
   Protocol compose_protocol=Protocol::Unknown;
   Record record{};
@@ -30,6 +31,22 @@ inline void fingerprint(const Contact& c,char (&out)[65]) {
 }
 inline bool hasKey(const Contact& c) {for(auto b:c.public_key)if(b)return true;return false;}
 inline bool canDirect(const Contact& c) {return c.trusted && !c.key_changed && hasKey(c);}
+inline void refreshContact(State& s,const Model& m) {
+  if(s.screen!=Screen::Contact && s.screen!=Screen::Trust)return;
+  const Contact* current=m.messages.contacts && s.selected<std::min(unsigned(m.messages.contact_count),unsigned(tunnel::messaging::ContactCount))?
+      &m.messages.contacts[s.selected]:nullptr;
+  if(!current || current->node!=s.contact.node || current->protocol!=s.contact.protocol ||
+      std::memcmp(current->public_key,s.contact.public_key,32))s.contact_stale=true;
+  if(s.contact_stale) {
+    s.contact.trusted=false;
+    std::snprintf(s.error,sizeof(s.error),"Contact changed; reopen from Contacts");
+    return;
+  }
+  // An asynchronous trust save may succeed or fail without leaving this view.
+  // Refresh its result only for the exact identity the user opened; never
+  // replace the fingerprint under an in-progress review or confirmation.
+  s.contact.trusted=current->trusted;s.contact.key_changed=current->key_changed;
+}
 inline void refreshRecord(State& s,const Model& m) {
   // Start/stop may pause or restore BLE asynchronously. A queued request is
   // not proof that the selected protocol obtained radio ownership.
@@ -39,6 +56,7 @@ inline void refreshRecord(State& s,const Model& m) {
     } else if(m.messages_transitioning)std::snprintf(s.error,sizeof(s.error),"Preparing messaging; please wait");
     else s.error[0]=0; // A rejected start leaves Mode and the main-loop notice visible.
   }
+  refreshContact(s,m);
   if(s.screen!=Screen::Detail || !m.messages.history)return;
   for(unsigned i=0;i<std::min(unsigned(m.messages.history_count),unsigned(tunnel::messaging::HistoryCount));++i) {
     const auto& r=m.messages.history[i];
@@ -137,8 +155,9 @@ inline Result choose(State& s,unsigned i,const Model& m,Handler emit) {
       else {if(emit)emit(Action::StopMessages,0,"");return Result::Exit;}
       break;
     case Screen::Inbox:s.record=m.messages.history[i];s.screen=Screen::Detail;break;
-    case Screen::Contacts:s.contact=m.messages.contacts[i];s.selected=i;s.screen=Screen::Contact;break;
+    case Screen::Contacts:s.contact=m.messages.contacts[i];s.selected=i;s.contact_stale=false;s.screen=Screen::Contact;break;
     case Screen::Contact:
+      refreshContact(s,m);if(s.contact_stale)break;
       if(i==0) {
         if(!canDirect(s.contact)) {std::snprintf(s.error,sizeof(s.error),"Verify the current public key first");break;}
         if(s.contact.protocol!=m.messages.protocol) {std::snprintf(s.error,sizeof(s.error),"Select this contact's protocol first");break;}
@@ -148,7 +167,10 @@ inline Result choose(State& s,unsigned i,const Model& m,Handler emit) {
       else if(i==2) {char key[65];fingerprint(s.contact,key);if(emit)emit(Action::ForgetContact,int(s.selected),key);s.screen=Screen::Contacts;}
       break;
     case Screen::Trust:
-      if(i && hasKey(s.contact)) {char key[65];fingerprint(s.contact,key);if(emit)emit(Action::TrustContact,int(s.selected),key);}
+      if(i) {
+        refreshContact(s,m);if(s.contact_stale)break;
+        if(hasKey(s.contact)) {char key[65];fingerprint(s.contact,key);if(emit)emit(Action::TrustContact,int(s.selected),key);}
+      }
       s.screen=Screen::Contact;break;
     case Screen::Settings:s.composing=false;s.setting=i;return Result::Edit;
     case Screen::TxConfirm:if(i && emit)emit(Action::ToggleMessageTx,1,"");s.screen=Screen::Menu;break;

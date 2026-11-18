@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "gnss_protocol.h"
 #include "lora_scan.h"
+#include "mesh_decode.h"
 namespace tunnel {
 using GnssSkyView=gnss_protocol::SkyView;
 // Coordinate-free diagnostics. Read on the main loop that calls gnssTick().
@@ -56,6 +57,11 @@ bool loraReady();
 lora_scan::Status loraScanStatus();
 // Idle only. Retune/reinitialize LoRa after a saved region without rebooting.
 bool scannersConfigureLoRa();
+// Exclusive messaging owner; capture must be stopped. A failed end leaves the
+// workspace owned until standby can be confirmed and retried.
+bool scannersMessagesBegin(mesh::Protocol);
+bool scannersMessagesEnd();
+bool scannersMessagesCancelTx();
 void gnssEnd();
 void gnssBegin();
 void gnssTick();

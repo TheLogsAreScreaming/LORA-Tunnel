@@ -99,6 +99,9 @@ lora_scan::Status radioStatus;
 lora_scan::Dwell radioDwell;
 enum class RadioTransition {None,Receive,Standby};
 RadioTransition radioPending=RadioTransition::None;
+enum class ChatPhase {Off,Receive,Cad,Transmit};
+ChatPhase chatPhase=ChatPhase::Off;
+void installTransmitSwitching(){}
 // SCANNER_IMPLEMENTATION
 }
 }

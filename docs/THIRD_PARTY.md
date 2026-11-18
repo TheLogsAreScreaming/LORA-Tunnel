@@ -20,6 +20,27 @@ Firmware AES-CTR uses the existing ESP-IDF mbedTLS component and its retained fr
 
 Read-only source snapshots downloaded under `research/lora-source` are inspection material, not firmware dependencies. Keep them out of distributable firmware source archives unless deliberately bundling complete upstream notices and provenance. Dependency libraries added elsewhere in the project require their own pinned-version and license inventory. If LoRaPipe code is later adapted, retain its MIT notice and identify the exact adapted files. Porting Kismet or Meshtastic implementation code requires a fresh license review and appropriate notices/source obligations.
 
+## Messaging additions, 2026-11-17
+
+The independent MIT messaging encoders, parsers and endpoint state machine use
+Meshtastic firmware `6d41e279f1f51bd59f687b9d441c1bf47b1594fc`, protobuf definitions
+`62b09edf40711fd7bd17804b2fa62ba327fcea60`, and MeshCore
+`75b04ef06def54b348400cb1b138afb6749ffd4f` as protocol references. No Meshtastic
+implementation or generated protobuf source is incorporated. AES-CTR/CCM and
+HMAC use the existing SDK mbedTLS; X25519 and Ed25519 use the pinned Crypto
+dependency with its retained notices.
+
+Six unmodified Ed25519 exchange/field-arithmetic files from MeshCore's
+`lib/ed25519`, originally by Orson Peters, are included under their **zlib**
+license. The [original license](../lib/meshdecode/src/meshcore_ed25519/license.txt)
+and [pinned provenance](../lib/meshdecode/src/meshcore_ed25519/README.md) accompany
+the sources and must remain in source and relinking packages.
+
+[SquachWatch-CYD `35244470f890f170ef4b6588cee87b2c0407f495`](https://github.com/skizzophrenic/SquachWatch-CYD/tree/35244470f890f170ef4b6588cee87b2c0407f495)
+is a conceptual feature reference for channel/private messaging. Its GPL-3.0
+implementation, UI and artwork are not copied. See [MESSAGING.md](MESSAGING.md)
+for endpoint scope and the distinction between host checks and physical testing.
+
 ## Imported Recon sources and retained notices
 
 | Component | Pinned revision | License and retained evidence | Relationship to LORA Tunnel |

@@ -17,6 +17,9 @@
 #include "resource_memory.h"
 #include "uploader.h"
 #include "alert_tones.h"
+#include "messaging.h"
+#include "messaging_airtime.h"
+#include "utc_seconds.h"
 
 using namespace tunnel;
 namespace {
@@ -29,6 +32,11 @@ void IRAM_ATTR allocationFailed(size_t,uint32_t,const char*) {
 }
 bool ready=false,stopping=false,hardwareReady=false;
 bool startAfterUpload=false;
+enum class MessageOwner { Off, Pausing, Active, Restoring, Fault };
+MessageOwner messageOwner=MessageOwner::Off;
+mesh::Protocol requestedMessageProtocol=mesh::Protocol::Meshtastic;
+std::atomic<unsigned> messageMaintenanceResult{0};
+bool cancelMessageStart=false,shutdownAfterMessages=false;
 bool initWriter=false,initScanner=false,initMemory=false;
 uint32_t heapAfterHardware=0,heapAfterUi=0,heapAfterConfig=0,heapBeforeScanners=0;
 bool shutdownPending=false,shutdownHadSession=false;
@@ -44,7 +52,7 @@ alerts::AlertHistory alertHistory;
 bool alertHistoryNotice=false;
 StaticQueue_t captureQueueControl;
 uint8_t* captureQueueStorage=nullptr;
-struct Action { ui::Action action; int field; char value[128]{}; };
+struct Action { ui::Action action; int field; char value[128]{}; uint8_t contact_key[32]{}; };
 QueueHandle_t actions=nullptr;
 struct Summary {
   bool used=false;
@@ -70,8 +78,74 @@ bool configScratchAllowed() {
 void callback(ui::Action action,int field,const char* value) {
   Action request{}; request.action=action; request.field=field;
   strlcpy(request.value,value,sizeof(request.value));
+  if(action==ui::Action::SendMessage&&field>=0&&field<model.messages.contact_count&&model.messages.contacts)
+    memcpy(request.contact_key,model.messages.contacts[field].public_key,32);
   if(xQueueSend(actions,&request,0)!=pdTRUE) strlcpy(model.notice,"Busy: please try again",sizeof(model.notice));
   memset(request.value,0,sizeof(request.value));
+}
+const char* defaultMessageChannel() {
+  const auto* preset=lora_profiles::findModemPreset(config.meshtastic_preset);
+  return preset?preset->name:"LongFast";
+}
+uint32_t messageUtc(){const auto clock=currentFix();return clock.utc_age_ms<=1500?utcSeconds(clock.utc):0;}
+void messageMaintenanceDone() { messageMaintenanceResult.fetch_or(4); }
+void pauseMessageBle(void*) {
+  const bool ok=scannersPauseBleForUpload();
+  if(ok)vTaskDelay(pdMS_TO_TICKS(30)); // allow the deleted NimBLE task to be reclaimed
+  messageMaintenanceResult.store(ok?1:2);
+}
+void restoreMessageBle(void*) {messageMaintenanceResult.store(scannersRestoreBleAfterUpload()?1:2);}
+bool restoreAfterMessages() {
+  if(!board::HAS_KEYBOARD){messageOwner=MessageOwner::Off;return true;}
+  messageMaintenanceResult=0;messageOwner=MessageOwner::Restoring;
+  if(loggerRequestMaintenance(restoreMessageBle,nullptr,messageMaintenanceDone))return true;
+  messageOwner=MessageOwner::Fault;shutdownAfterMessages=false;strlcpy(model.notice,"BLE restore unavailable; restart",sizeof(model.notice));return false;
+}
+bool stopMessages() {
+  if(messageOwner==MessageOwner::Off)return true;
+  if(messageOwner==MessageOwner::Pausing){cancelMessageStart=true;return false;}
+  if(messageOwner==MessageOwner::Restoring)return false;
+  if(!scannersMessagesEnd()){strlcpy(model.notice,"Radio stop failed; retry before leaving",sizeof(model.notice));return false;}
+  messaging::end();
+  model.messages=messaging::View{};
+  return restoreAfterMessages()&&messageOwner==MessageOwner::Off;
+}
+void finishMessageStart() {
+  if(!messaging::begin(requestedMessageProtocol,config.messages,defaultMessageChannel(),messaging::platformStorage())||
+      !scannersMessagesBegin(requestedMessageProtocol)){
+    messaging::end();scannersConfigureLoRa();restoreAfterMessages();
+    strlcpy(model.notice,"Messages unavailable; check radio/identity",sizeof(model.notice));return;
+  }
+  messageOwner=MessageOwner::Active;model.notice[0]=0;
+}
+void startMessages(int protocol) {
+  if(protocol!=1&&protocol!=2)return;
+  if(messageOwner!=MessageOwner::Off){strlcpy(model.notice,"Stop current Messages mode first",sizeof(model.notice));return;}
+  if(capturing||stopping||!loggerIdle()||uploaderBusy()||!ready||shutdownPending||quietActive){
+    strlcpy(model.notice,"Stop and save capture/upload before Messages",sizeof(model.notice));return;
+  }
+  if(!config.lora_enabled||!regionHardwareCompatible()||!loraReady()){
+    strlcpy(model.notice,"Set a valid LoRa region and connect radio",sizeof(model.notice));return;
+  }
+  requestedMessageProtocol=static_cast<mesh::Protocol>(protocol);cancelMessageStart=false;
+  if(!board::HAS_KEYBOARD){finishMessageStart();return;}
+  messageMaintenanceResult=0;messageOwner=MessageOwner::Pausing;
+  if(!loggerRequestMaintenance(pauseMessageBle,nullptr,messageMaintenanceDone)){
+    messageOwner=MessageOwner::Off;strlcpy(model.notice,"Writer busy; retry Messages",sizeof(model.notice));
+  }else strlcpy(model.notice,"Preparing messaging memory...",sizeof(model.notice));
+}
+void serviceMessageOwner() {
+  const unsigned result=messageMaintenanceResult.load();
+  if(!(result&4))return;
+  messageMaintenanceResult=0;
+  if(messageOwner==MessageOwner::Pausing){
+    if(!(result&1)||cancelMessageStart){restoreAfterMessages();return;}
+    finishMessageStart();
+  }else if(messageOwner==MessageOwner::Restoring){
+    messageOwner=(result&1)?MessageOwner::Off:MessageOwner::Fault;
+    if(!(result&1))shutdownAfterMessages=false;
+    strlcpy(model.notice,(result&1)?"Messages stopped; capture ready":"BLE restore failed; restart before capture",sizeof(model.notice));
+  }
 }
 void emitDetectionAlert(const Observation& event,bool allowed,uint32_t now) {
   // Drain/Stop can still consume queued evidence; that must never start audio.
@@ -204,6 +278,7 @@ __attribute__((noinline)) bool logSessionMarker(Kind kind,CaptureMode mode,uint3
   return logObservation(marker);
 }
 void requestSession() {
+  if(messageOwner!=MessageOwner::Off){strlcpy(model.notice,"Close Messages before starting capture",sizeof(model.notice));return;}
   if(shutdownPending) { strlcpy(model.notice,"Shutdown in progress",sizeof(model.notice)); return; }
   if(quietActive) { strlcpy(model.notice,"GNSS quiet test; restart to capture",sizeof(model.notice)); return; }
   if(capturing.load()) {
@@ -257,8 +332,41 @@ void performActions() {
     return;
   }
   switch(action.action) {
+    case ui::Action::StartMessages: startMessages(action.field);break;
+    case ui::Action::StopMessages: stopMessages();break;
+    case ui::Action::ToggleMessageTx:
+      if(action.field&&(!messaging::dutyPercent(config.region)))strlcpy(model.notice,"This region is receive-only for messaging",sizeof(model.notice));
+      else if(action.field||scannersMessagesCancelTx())messaging::setTransmit(action.field!=0);
+      break;
+    case ui::Action::SendMessage:
+      messaging::send(action.field,action.contact_key,action.value,millis(),messageUtc());break;
+    case ui::Action::AnnounceIdentity: messaging::announce(millis(),messageUtc());break;
+    case ui::Action::TrustContact:
+    case ui::Action::ForgetContact: {
+      uint8_t key[32]{},length=0;
+      const bool valid=messaging::readHex(action.value,key,length)&&length==32&&action.field>=0;
+      const bool ok=valid&&(action.action==ui::Action::TrustContact?messaging::trustContact(unsigned(action.field),key):messaging::forgetContact(unsigned(action.field),key));
+      if(!ok)strlcpy(model.notice,"Contact changed or busy; reopen contact",sizeof(model.notice));
+      break;
+    }
+    case ui::Action::SaveMessagingSetting:
+      if(capturing||stopping||!loggerIdle()||uploaderBusy()||messaging::busy())strlcpy(model.notice,"Wait for capture/upload/message to finish",sizeof(model.notice));
+      else if(!storageReady())strlcpy(model.notice,"Insert SD to save messaging settings",sizeof(model.notice));
+      else {
+        messaging::View before;messaging::view(before);
+        if(before.active&&!scannersMessagesEnd()){strlcpy(model.notice,"Radio busy; setting was not changed",sizeof(model.notice));break;}
+        if(before.active)messaging::setTransmit(false);
+        xSemaphoreTake(busMutex,portMAX_DELAY);
+        const bool saved=saveMessagingSetting(action.field,action.value);xSemaphoreGive(busMutex);
+        const bool applied=saved&&messaging::updateSettings(config.messages,defaultMessageChannel());
+        const bool restored=!before.active||scannersMessagesBegin(before.protocol);
+        if(restored&&before.active&&before.tx_enabled)messaging::setTransmit(true);
+        if(!restored)messaging::radioFailure("Radio restart failed; stop Messages");
+        strlcpy(model.notice,!restored?"Radio restart failed; stop Messages":applied?"Messaging settings saved":"Invalid setting or save failed",sizeof(model.notice));
+      }
+      break;
     case ui::Action::ToggleAutoUpload:
-      if(capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop capture/upload before changing",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop capture/Messages before changing",sizeof(model.notice));
       else if(!storageReady()) strlcpy(model.notice,"No SD: upload setting not saved",sizeof(model.notice));
       else {
         xSemaphoreTake(busMutex,portMAX_DELAY);
@@ -269,7 +377,7 @@ void performActions() {
       }
       break;
     case ui::Action::UploadNow:
-      if(capturing || stopping || !loggerIdle() || !ready) strlcpy(model.notice,"Stop and save before upload",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || !ready) strlcpy(model.notice,"Stop capture/Messages before upload",sizeof(model.notice));
       else if(!uploaderRequest(action.field)) strlcpy(model.notice,"Upload unavailable; check settings",sizeof(model.notice));
       break;
     case ui::Action::CancelUpload: uploaderCancel(); startAfterUpload=false; break;
@@ -285,7 +393,7 @@ void performActions() {
     case ui::Action::SaveMeshCoreProfile:
     case ui::Action::SaveLoRaDwell:
     case ui::Action::SavePublicDecode:
-      if(capturing || stopping || !loggerIdle() || uploaderBusy())strlcpy(model.notice,"Stop and save before changing LoRa",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || uploaderBusy())strlcpy(model.notice,"Stop capture/Messages before changing LoRa",sizeof(model.notice));
       else if(!storageReady())strlcpy(model.notice,"Insert SD to save mesh settings",sizeof(model.notice));
       else {
         xSemaphoreTake(busMutex,portMAX_DELAY);
@@ -305,7 +413,7 @@ void performActions() {
       }
       break;
     case ui::Action::SaveRegion:
-      if(capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop and save before changing region",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop capture/Messages before changing region",sizeof(model.notice));
       else if(xSemaphoreTake(busMutex,pdMS_TO_TICKS(300))!=pdTRUE)
         strlcpy(model.notice,"Storage busy; region was not changed",sizeof(model.notice));
       else {
@@ -319,6 +427,11 @@ void performActions() {
       }
       break;
     case ui::Action::Shutdown:
+      if(messageOwner!=MessageOwner::Off){
+        shutdownAfterMessages=true;stopMessages();
+        if(messageOwner==MessageOwner::Active||messageOwner==MessageOwner::Fault)shutdownAfterMessages=false;
+        break;
+      }
       alertPlayer.setEnabled(false);
       if(!shutdownPending) {
         uploaderCancel(); startAfterUpload=false;
@@ -330,7 +443,7 @@ void performActions() {
       }
       break;
     case ui::Action::RetryStorage:
-      if(capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop session before remounting SD",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop capture/Messages before remounting SD",sizeof(model.notice));
       else {
         xSemaphoreTake(busMutex,portMAX_DELAY);
         bool ok=mountStorage(); xSemaphoreGive(busMutex);
@@ -338,7 +451,7 @@ void performActions() {
       }
       break;
     case ui::Action::SaveCredential:
-      if(capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop session before saving keys",sizeof(model.notice));
+      if(messageOwner!=MessageOwner::Off || capturing || stopping || !loggerIdle() || uploaderBusy()) strlcpy(model.notice,"Stop capture/Messages before saving keys",sizeof(model.notice));
       else if(!storageReady()) strlcpy(model.notice,"No SD: key was not saved",sizeof(model.notice));
       else {
         xSemaphoreTake(busMutex,portMAX_DELAY);
@@ -352,6 +465,8 @@ void performActions() {
   for(size_t i=0;i<sizeof(action.value);++i) secret[i]=0;
 }
 void refreshModel() {
+  messaging::view(model.messages);
+  model.messages_transitioning=messageOwner==MessageOwner::Pausing||messageOwner==MessageOwner::Restoring;
   model.running=capturing; model.sd=storageReady(); model.lora_ready=loraReady();
   model.wifi=totals[0]; model.ble=totals[1]; model.lora=totals[2];
   model.drops=counters.ingress_drops+counters.log_drops;
@@ -383,6 +498,9 @@ void refreshModel() {
   strlcpy(model.meshcore_profile,config.meshcore_profile,sizeof(model.meshcore_profile));
   model.lora_dwell_ms=config.lora_dwell_ms;model.decode_public=config.decode_public;
   strlcpy(model.profile,config.lora_enabled?radioStatus.active.name:"OFF: Settings > LoRa region",sizeof(model.profile));
+  if(model.messages.active)snprintf(model.profile,sizeof(model.profile),"%s %.3fMHz / %.1fk SF%u 4/%u",
+      model.messages.protocol==mesh::Protocol::Meshtastic?"MT":"MC",radioStatus.active.frequency_mhz,
+      radioStatus.active.bandwidth_khz,unsigned(radioStatus.active.sf),unsigned(radioStatus.active.cr));
   if(radioStatus.combined)snprintf(model.lora_detail,sizeof(model.lora_detail),"Both / next %lus / decoded %lu",(unsigned long)((radioStatus.remaining_ms+999)/1000),(unsigned long)meshDecoded);
   else snprintf(model.lora_detail,sizeof(model.lora_detail),"Locked / decoded %lu / other %lu",(unsigned long)meshDecoded,(unsigned long)meshUnknown);
   memset(model.recent,0,sizeof(model.recent));
@@ -426,6 +544,7 @@ void serialStatus() {
   const auto fix=currentFix();
   const auto uploadMetrics=uploaderMetrics();
   const auto radioMetrics=loraScanStatus();
+  messaging::View chat;messaging::view(chat);
   Serial.printf("LT STATUS version=%s target=%s uptime_ms=%lu ready=%d running=%d saving=%d sd=%d touch=%d lora=%d gps_chars=%lu gps_fix=%d sats=%u wifi=%lu ble=%lu lora_rx=%lu drops=%lu errors=%lu free_heap=%u mode=%s matches=%lu free_psram=%u quiet=%d min_internal=%u largest_internal=%u loop_stack=%u writer_stack=%lu ui_p95_ms=%lu ui_max_ms=%lu ui_samples=%lu upload=%d input_ok=%d cap_ok=%d init_writer=%d init_scanner=%d init_memory=%d scanner_stage=%s heap_hw=%lu heap_ui=%lu heap_config=%lu heap_before_scan=%lu audio_ok=%d tone_active=%d alerted=%u alert_full=%d alloc_hook=%d alloc_fail=%lu upload_runs=%lu upload_min_free=%lu upload_largest=%lu upload_stack=%lu upload_check=%lu upload_ready_free=%lu upload_ready_block=%lu\n",
     TUNNEL_VERSION,board::TARGET_ID,(unsigned long)millis(),ready,capturing.load(),stopping,storageReady(),hw::touchPresent(),loraReady(),gnssCharacters(),fix.valid,fix.satellites,
     (unsigned long)totals[0],(unsigned long)totals[1],(unsigned long)totals[2],
@@ -441,6 +560,8 @@ void serialStatus() {
     (unsigned long)uploadMetrics.stack_margin,(unsigned long)uploadMetrics.self_check,
     (unsigned long)uploadMetrics.ready_free,(unsigned long)uploadMetrics.ready_block);
   // Only receiver settings and counters: never packet contents, keys or locations.
+  Serial.printf("LT CHAT owner=%u active=%u tx=%u identity_ready=%u contacts=%u inbox=%u pending=%u workspace=%u\n",
+      unsigned(messageOwner),chat.active,chat.tx_enabled,chat.identity_ready,unsigned(chat.contact_count),unsigned(chat.history_count),messaging::busy(),unsigned(messaging::workspaceBytes()));
   Serial.printf("LT RADIO mode=%u protocol=%u frequency_khz=%lu bandwidth_hz=%lu sf=%u cr=%u sync=%u remaining_ms=%lu switches=%lu deferrals=%lu timeouts=%lu interruptions=%lu mt_listen_ms=%lu mc_listen_ms=%lu mt_rx=%lu mc_rx=%lu decoded=%lu other=%lu\n",
     unsigned(config.lora_mode),unsigned(radioMetrics.active.protocol),
     (unsigned long)(radioMetrics.active.frequency_mhz*1000.0f+0.5f),
@@ -493,7 +614,7 @@ void serviceShutdown() {
   hw::enterDeepSleep();
 }
 void enterQuietTest(unsigned seconds=90) {
-  if(quietActive || capturing.load() || stopping || !loggerIdle() || uploaderBusy()) {
+  if(messageOwner!=MessageOwner::Off || quietActive || capturing.load() || stopping || !loggerIdle() || uploaderBusy()) {
     Serial.println("LT QUIET refused=1 reason=stop_and_save_first"); return;
   }
   // This independent timer also restores normal firmware if an upstream radio
@@ -522,7 +643,7 @@ void enterQuietTest(unsigned seconds=90) {
 }
 void serialCommands() {
   // Optional bench control; standalone operation never depends on USB.
-  static char command[24]{};
+  static char command[64]{};
   static size_t length=0;
   static bool overflow=false;
   unsigned budget=64;
@@ -542,6 +663,13 @@ void serialCommands() {
         else if(!strcmp(command,"tunnel start")) { if(!capturing.load()) requestSession(); serialStatus(); }
         else if(!strcmp(command,"tunnel stop")) { if(capturing.load()) requestSession(); serialStatus(); }
         else if(!strcmp(command,"tunnel status")) serialStatus();
+        else if(!strcmp(command,"tunnel chat-mt")) {startMessages(1);serialStatus();}
+        else if(!strcmp(command,"tunnel chat-mc")) {startMessages(2);serialStatus();}
+        else if(!strcmp(command,"tunnel chat-stop")) {stopMessages();serialStatus();}
+        else if(!strncmp(command,"tunnel preset ",14))callback(ui::Action::SaveMeshtasticPreset,0,command+14);
+        else if(!strcmp(command,"tunnel mesh-mt"))callback(ui::Action::SaveLoRaMode,0,"");
+        else if(!strcmp(command,"tunnel mesh-mc"))callback(ui::Action::SaveLoRaMode,1,"");
+        else if(!strcmp(command,"tunnel mesh-both"))callback(ui::Action::SaveLoRaMode,2,"");
         else if(!strcmp(command,"tunnel upload-check")) {
           const bool allowed=ready && !capturing.load() && !stopping && !gnssControlPending() && !uploaderBusy() && loggerIdle();
           Serial.printf("LT UPLOAD_CHECK accepted=%d offline=1\n",allowed&&uploaderSelfCheck());
@@ -637,7 +765,8 @@ void loop() {
   if(!hardwareReady) { serialCommands(); delay(10); return; }
   if(quietActive) { gnssTick(); serialCommands(); delay(5); return; }
   serviceAlerts();
-  gnssTick(); scannersTick(); drain(8); performActions(); serialCommands();
+  gnssTick(); scannersTick(); drain(8); performActions(); serialCommands();serviceMessageOwner();
+  if(shutdownAfterMessages&&messageOwner==MessageOwner::Off){shutdownAfterMessages=false;callback(ui::Action::Shutdown,0,"");}
   serviceAlerts();
   if(quietActive) { delay(5); return; }
   // Always drain the debounce state, even when navigation is disabled in config.
@@ -663,7 +792,7 @@ void loop() {
   static uint32_t lastBattery=0;
   if(millis()-lastBattery>5000) { model.battery=hw::batteryVolts(); lastBattery=millis(); }
   if(startAfterUpload && !uploaderBusy()) { startAfterUpload=false; requestSession(); }
-  uploaderTick(ready && !capturing.load() && !stopping && loggerIdle() && !shutdownPending && !startAfterUpload,ui::allowsBackgroundUpload(),ui::allowsUploadJobPolling());
+  uploaderTick(messageOwner==MessageOwner::Off && ready && !capturing.load() && !stopping && loggerIdle() && !shutdownPending && !startAfterUpload,ui::allowsBackgroundUpload(),ui::allowsUploadJobPolling());
   refreshModel();
   if(!board::DISPLAY_SHARED_WITH_SD) ui::tick(model);
   else if(xSemaphoreTake(busMutex,0)==pdTRUE) { ui::tick(model); xSemaphoreGive(busMutex); }

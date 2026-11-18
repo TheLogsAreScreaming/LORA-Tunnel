@@ -37,6 +37,7 @@ const char* primary="/lora-tunnel/config.json";
 const char* ruleFile="/lora-tunnel/detection_rules.json";
 const char* initial=R"({"schema":1,"lora":{"region":"UNSET","selection_complete":false,"enabled":false},"credentials":{"wigle_api_name":"old-name","wigle_api_token":"old-token","wifi_ssid":"Home","wifi_password":"password"},"extension":{"preserved":"yes"}})";
 void reset(){
+  host::fileHooks()=host::FileHooks{};
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
   host::resetCheckedFaults();
 #endif
@@ -93,6 +94,26 @@ void meshSettingsChecks(){
     expect(!std::memcmp(live,&config,sizeof(config))&&regionSelectionMade()==selected&&regionHardwareCompatible()==compatible,"failed mesh save leaves all live settings and compatibility flags unchanged");
   }
   host::failWritePath.clear();
+  // A successful write followed by an old but valid readback must not report
+  // success, replace the primary, or restore old live settings.
+  host::fileHooks().afterFlush=[](const std::string& file){
+    if(file=="/lora-tunnel/config.tmp")host::files[file]=host::files[primary];
+  };
+  for(unsigned operation=0;operation!=6;++operation){
+    bool result=false;
+    switch(operation){
+      case 0:result=saveMeshtasticPreset("MEDIUM_FAST");break;
+      case 1:result=saveMeshtasticSlot(4);break;
+      case 2:result=saveMeshCoreProfile("AUTO");break;
+      case 3:result=saveLoRaDwell(60000);break;
+      case 4:result=savePublicDecode(true);break;
+      case 5:result=saveLoRaMode(0);break;
+    }
+    expect(!result,"different valid readback rejects a mesh save");released();
+    expect(host::files[primary]==before&&!host::files.count("/lora-tunnel/config.tmp"),"stale readback preserves primary and removes temp");
+    expect(!std::memcmp(live,&config,sizeof(config)),"stale readback leaves live mesh configuration unchanged");
+  }
+  host::fileHooks().afterFlush=nullptr;
   host::files["/lora-tunnel/config.bak"]=before;host::files[primary]="{bad";
   expect(loadConfig()&&configLoadState==ConfigLoadState::Backup,"mesh configuration recovers from valid backup");released();
   expect(saveMeshtasticSlot(4)&&configLoadState==ConfigLoadState::Primary,"mesh save promotes recovered backup with chosen slot");released();assertPreserved();
@@ -141,6 +162,90 @@ void meshSettingsChecks(){
   expect(loadConfig()&&!config.lora_enabled&&!regionHardwareCompatible(),"unavailable imported MeshCore profile disables combined reception");released();
   expect(saveMeshCoreProfile("US-NARROW")&&config.lora_enabled&&regionHardwareCompatible()&&regionSelectionMade(),"compatible MeshCore profile restores all live compatibility flags");released();
 #endif
+}
+void messagingSettingsChecks(){
+  using namespace tunnel;
+  // Public synthetic keys exercise serialization; no private/device files are read.
+  const char* key16="000102030405060708090a0b0c0d0e0f";
+  const char* key32="202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+  reset();expect(loadConfig(),"legacy config gains safe messaging defaults");released();
+  expect(messaging::sameSettings(config.messages,messaging::Settings{}),"missing messaging section is public defaults without persistent TX state");
+  {
+    ArduinoJson::StaticJsonDocument<4096> document;
+    expect(!deserializeJson(document,host::files[primary]),"messaging baseline parses");
+    document["messaging"]["future_metadata"]["preserved"]=true;
+    host::files[primary].clear();serializeJson(document,host::files[primary]);
+  }
+  const std::string maximumName(31,'N'),maximumChannel(39,'C');
+  const char* values[]={maximumName.c_str(),maximumChannel.c_str(),key16,key32,"7"};
+  for(int field=0;field<5;++field){expect(saveMessagingSetting(field,values[field]),"each messaging setting saves at its supported boundary");released();}
+  const auto configured=config.messages;
+  expect(!std::strcmp(configured.name,maximumName.c_str())&&!std::strcmp(configured.meshtastic_channel,maximumChannel.c_str())&&configured.hop_limit==7,"name channel and hop settings apply immediately");
+  expect(configured.meshtastic_key_length==16&&configured.meshcore_key_length==32&&configured.meshtastic_key[15]==15&&configured.meshcore_key[31]==63,"both different key buffers retain their own bytes");
+  expect(loadConfig()&&messaging::sameSettings(config.messages,configured),"all messaging settings survive reload");released();
+  const auto assertPreserved=[&](){
+    ArduinoJson::StaticJsonDocument<4096> document;
+    expect(!deserializeJson(document,host::files[primary]),"saved messaging document parses");
+    expect(document["messaging"]["meshtastic_key_hex"]==key16&&document["messaging"]["meshcore_key_hex"]==key32,"stack hex buffer copies remain distinct in saved JSON");
+    expect(document["messaging"]["future_metadata"]["preserved"]==true&&document["extension"]["preserved"]=="yes","messaging saves preserve unknown root and messaging fields");
+    expect(document["credentials"]["wigle_api_token"]=="old-token"&&document["credentials"]["wifi_password"]=="password","messaging saves preserve unrelated credentials");
+  };
+  assertPreserved();
+  expect(saveLoRaRegion("US",true).sd_saved,"region settings save alongside messaging keys");released();
+  expect(saveMeshtasticPreset("LONG_TURBO"),"radio settings save alongside messaging keys");released();
+  expect(saveAutoUpload(0,true),"upload preferences save alongside messaging keys");released();
+  expect(messaging::sameSettings(config.messages,configured),"unrelated settings retain exact live messaging configuration");assertPreserved();
+  const auto before=host::files[primary];
+  struct Invalid {int field;const char* value;};
+  const std::string tooLongName(32,'N'),tooLongChannel(40,'C');
+  const Invalid invalid[]={
+    {-1,"x"},{5,"x"},{0,nullptr},{0,""},{0,"A:B"},{0,"A\n"},{0,tooLongName.c_str()},
+    {1,tooLongChannel.c_str()},{1,"A\tB"},{2,"AQ=="},{2,"0"},{2,"gggggggggggggggggggggggggggggggg"},
+    {3,"abc"},{3,"000102030405060708090a0b0c0d0e0f\n"},{4,"8"},{4,"-1"},{4,"03"},{4,"3 "},{4,""}
+  };
+  for(const auto& value:invalid){
+    expect(!saveMessagingSetting(value.field,value.value),"invalid messaging editor value is rejected");released();
+    expect(host::files[primary]==before&&messaging::sameSettings(config.messages,configured),"invalid messaging edit changes neither disk nor live settings");
+  }
+  const char* alternate[]={"Changed name","Changed channel",key32,key16,"0"};
+  for(unsigned fault=0;fault<2;++fault){
+    if(fault==0)host::failWritePath="config.tmp";
+    else host::fileHooks().afterFlush=[](const std::string& file){if(file=="/lora-tunnel/config.tmp")host::files[file]=host::files[primary];};
+    for(int field=0;field<5;++field){
+      expect(!saveMessagingSetting(field,alternate[field]),"failed write or stale valid readback rejects every messaging setting");released();
+      expect(host::files[primary]==before&&!host::files.count("/lora-tunnel/config.tmp")&&messaging::sameSettings(config.messages,configured),"failed messaging save preserves source and live keys and removes temporary file");
+    }
+    host::failWritePath.clear();host::fileHooks().afterFlush=nullptr;
+  }
+  for(unsigned corrupt=0;corrupt<2;++corrupt){
+    if(corrupt){host::files[primary]="{bad";host::files["/lora-tunnel/config.bak"]="{bad";}
+    else{host::files.erase(primary);host::files.erase("/lora-tunnel/config.bak");}
+    const auto untouched=host::files;
+    expect(!saveMessagingSetting(0,"Changed name"),"missing key source cannot be replaced by messaging defaults");released();
+    expect(host::files==untouched&&messaging::sameSettings(config.messages,configured),"refused fallback preserves configured private-key bytes");
+    host::files[primary]=before;
+  }
+  expect(saveMessagingSetting(2,"")&&saveMessagingSetting(3,"")&&saveMessagingSetting(1,"")&&saveMessagingSetting(4,"0"),"explicit blank saves restore public keys and AUTO channel");released();
+  expect(config.messages.meshtastic_key_length==0&&config.messages.meshcore_key_length==0&&!config.messages.meshtastic_channel[0]&&config.messages.hop_limit==0,"blank public reset and zero hops apply");
+  expect(std::all_of(config.messages.meshtastic_key,config.messages.meshtastic_key+32,[](uint8_t b){return b==0;})&&std::all_of(config.messages.meshcore_key,config.messages.meshcore_key+32,[](uint8_t b){return b==0;}),"public reset clears complete prior key buffers");
+  const auto resetSettings=config.messages;
+  expect(loadConfig()&&messaging::sameSettings(config.messages,resetSettings),"public reset survives restart");released();
+  // These are complete JSON sections, including embedded-NUL and invalid-type
+  // cases that a C-string-only editor cannot produce.
+  const char* invalidSections[]={
+    "null","[]","\"bad\"",R"({"name":""})",R"({"name":"A:B"})",R"({"name":"A\u0000B"})",
+    R"({"meshtastic_channel":"A\u0000B"})",R"({"meshtastic_key_hex":null})",R"({"meshtastic_key_hex":"AQ=="})",
+    R"({"meshtastic_key_hex":"000102030405060708090a0b0c0d0e0f\u0000"})",R"({"meshcore_key_hex":false})",
+    R"({"meshcore_key_hex":"gggggggggggggggggggggggggggggggg"})",R"({"hop_limit":8})",R"({"hop_limit":-1})",R"({"hop_limit":1.5})",R"({"hop_limit":true})",R"({"hop_limit":"3"})"
+  };
+  for(const auto* section:invalidSections){
+    reset();host::files[primary]=std::string(initial).substr(0,std::strlen(initial)-1)+",\"messaging\":"+section+"}";
+    expect(!loadConfig()&&configLoadState==ConfigLoadState::Invalid&&!config.lora_enabled,"malformed messaging import rejects configuration instead of silently choosing public defaults");released();
+    host::files["/lora-tunnel/config.bak"]=before;
+    expect(loadConfig()&&configLoadState==ConfigLoadState::Backup&&messaging::sameSettings(config.messages,configured),"valid backup recovers exact messaging keys from malformed primary");released();
+  }
+  reset();host::files[primary]=std::string(initial).substr(0,std::strlen(initial)-1)+R"(,"messaging":{"enabled":true,"tx_enabled":true}})";
+  expect(loadConfig()&&messaging::sameSettings(config.messages,messaging::Settings{}),"imported enable flags grant no persistent messaging permission or setting");released();
 }
 }
 int main(){using namespace tunnel;
@@ -259,5 +364,6 @@ int main(){using namespace tunnel;
   expect(!saveAutoUpload(0,true)&&host::files[primary]==safe&&host::bufferCalls==heldCalls,"unavailable framebuffer lease performs no SD I/O or heap fallback");released();host::failScratch=false;
 #endif
   meshSettingsChecks();
-  std::cout<<"Config memory host: "<<checks<<" checks passed; full16 KiB arena, scoped lease/heap, exact rule storage and mesh-setting persistence verified.\n";
+  messagingSettingsChecks();
+  std::cout<<"Config memory host: "<<checks<<" checks passed; full16 KiB arena, scoped lease/heap, exact rule storage and mesh/messaging-setting persistence verified.\n";
 }

@@ -5,6 +5,7 @@
 #include "version.h"
 #include "lora_profiles.h"
 #include "ui_mesh_settings.h"
+#include "ui_messages.h"
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -25,7 +26,10 @@ constexpr uint16_t AMBER = 0xfd20, RED = 0xf9aa, BORDER = 0x1368;
 constexpr const char* fields[] = {"WiGLE API name", "WiGLE API token",
   "WDGWars token", "Wi-Fi SSID", "Wi-Fi password"};
 
-enum class Page { Home, Wardriver, Recon, ReconDetail, Settings, Credentials, Regions, Keyboard, MeshSettings, MeshChoice };
+enum class Page { Home, Wardriver, Recon, ReconDetail, Settings, Credentials, Regions, Keyboard, MeshSettings, MeshChoice, Messages };
+ui::messages::State messageState;
+unsigned messagePage=0;
+bool messageEditor=false;
 Page page = Page::Home, settingsParent = Page::Home;
 ui::Handler onAction = nullptr;
 int tab = 0, field = 0, keyPage = 0;
@@ -191,11 +195,11 @@ void home(const ui::Model& m) {
            "Indicators / evidence / alerts", CYAN);
   button(8, 208, 224, 34, "SETTINGS / DEVICE PREFERENCES", CYAN);
   gfx().fillRect(8, 250, 224, 66, BG);
-  if (m.notice[0]) label(m.notice, 9, 252, AMBER, 1, 37);
+  button(8,246,224,28,"MESSAGES / MESHTASTIC + MESHCORE",GREEN);
+  if (m.notice[0]) label(m.notice, 9, 280, AMBER, 1, 37);
   else label(m.running ? "Capture continues while on Home." : "Choose a mode, then start a session.",
-             9, 252, MUTED, 1, 37);
-  label(m.buttons_enabled ? "IO: MOVE  USER: SELECT" : "TOUCH CONTROL / BUTTONS OFF", 9, 283, MUTED, 1, 37);
-  if (m.buttons_enabled) label("Hold USER for Back", 9, 297, MUTED, 1, 37);
+             9, 280, MUTED, 1, 37);
+  label(m.buttons_enabled ? "KEY: MOVE  USER: SELECT / HOLD BACK" : "TOUCH CONTROL / BUTTONS OFF", 9, 300, MUTED, 1, 37);
 }
 
 void wardriver(const ui::Model& m) {
@@ -479,6 +483,93 @@ void powerPopup(const ui::Model& m) {
   }
 }
 
+unsigned messageRowStart() {
+  using ui::messages::Screen;
+  return messageState.screen==Screen::Contact?144:messageState.screen==Screen::Trust?186:
+         messageState.screen==Screen::TxConfirm?180:92;
+}
+unsigned messageVisible() {
+  using ui::messages::Screen;
+  return messageState.screen==Screen::Contact?3:messageState.screen==Screen::Trust||messageState.screen==Screen::TxConfirm?2:4;
+}
+void messageScreen(const ui::Model& m) {
+  using ui::messages::Screen;
+  auto& s=messageState;heading(ui::messages::title(s));
+  ui::messages::refreshRecord(s,m);
+  gfx().fillRect(0,47,FRAME_WIDTH,227,BG);
+  char text[80];
+  if(s.screen==Screen::Contact||s.screen==Screen::Trust) {
+    if(m.messages.contacts && s.selected<std::min(unsigned(m.messages.contact_count),8U)) {
+      const auto& current=m.messages.contacts[s.selected];
+      if(current.node==s.contact.node && current.protocol==s.contact.protocol)s.contact=current;
+    }
+    snprintf(text,sizeof(text),"%.25s !%08lX",s.contact.name,(unsigned long)s.contact.node);label(text,9,50,CYAN,1,37);
+    label(ui::messages::protocolName(s.contact.protocol),9,64,MUTED,1,37);
+    char key[65];ui::messages::fingerprint(s.contact,key);
+    label(key,9,82,WHITE,1,32);label(key+32,9,94,WHITE,1,32);
+    label(s.contact.key_changed?"KEY CHANGED - VERIFY AGAIN":s.contact.trusted?"TRUSTED PUBLIC KEY":"UNVERIFIED PUBLIC KEY",9,112,s.contact.key_changed?AMBER:GREEN,1,37);
+    label("Compare all key digits with the owner.",9,126,MUTED,1,37);
+    if(s.screen==Screen::Trust)label("Trust only after independent checking.",9,151,AMBER,1,37);
+  } else if(s.screen==Screen::Identity) {
+    label(m.messages.name,9,52,GREEN,1,37);label(m.messages.channel,9,70,CYAN,1,37);
+    label(m.profile,9,88,WHITE,1,37);wrapped(m.messages.identity,9,116,sizeof(m.messages.identity),MUTED);
+    label(m.messages.identity_ready?"Compare identity before private chat":"Identity unavailable / TX disabled",9,168,m.messages.identity_ready?GREEN:AMBER,1,37);
+  } else if(s.screen==Screen::Detail) {
+    const auto& r=s.record;
+    label(r.name[0]?r.name:"Channel",9,52,CYAN,1,37);
+    snprintf(text,sizeof(text),"%s / %s",ui::messages::protocolName(r.protocol),r.direct?"PRIVATE":"CHANNEL");label(text,9,68,MUTED,1,37);
+    label(tunnel::messaging::deliveryName(r.delivery),9,88,r.delivery==tunnel::messaging::Delivery::Delivered?GREEN:AMBER,1,37);
+    wrapped(r.text,9,115,sizeof(r.text),WHITE);
+    label(r.authenticated?"Authenticated message":"Sender identity not authenticated",9,181,r.authenticated?GREEN:AMBER,1,37);
+  } else if(s.screen==Screen::TxConfirm) {
+    label("Enable transmission for this session?",9,57,AMBER,1,37);
+    label("TX starts OFF each messaging session.",9,77,MUTED,1,37);
+    label("Only the selected mesh uses the radio.",9,97,WHITE,1,37);
+    label(m.messages.channel,9,123,CYAN,1,37);label(m.profile,9,139,MUTED,1,37);
+  } else {
+    if(s.screen==Screen::Mode) {
+      label("One radio / choose one protocol",9,52,CYAN,1,37);
+      label(m.running?"Stop + save capture before messaging":"Receive first; enable TX when ready",9,69,m.running?AMBER:MUTED,1,37);
+    } else {
+      snprintf(text,sizeof(text),"%s / %s / TX %s",ui::messages::protocolName(m.messages.protocol),m.messages.active?"ACTIVE":"STOPPED",m.messages.tx_enabled?"ON":"OFF");
+      label(text,9,50,m.messages.tx_enabled?AMBER:CYAN,1,37);
+      snprintf(text,sizeof(text),"%.17s / %.18s",m.messages.channel,m.profile);label(text,9,65,MUTED,1,37);
+    }
+  }
+  const unsigned count=ui::messages::count(s,m),visible=messageVisible();
+  const unsigned pages=std::max(1U,(count+visible-1)/visible);messagePage=std::min(messagePage,pages-1);
+  for(unsigned i=0;i<visible && messagePage*visible+i<count;++i) {
+    ui::messages::row(s,messagePage*visible+i,m,text,sizeof(text));
+    button(8,int(messageRowStart()+i*34),224,30,text,GREEN);
+  }
+  if(!count && s.screen!=Screen::Detail && s.screen!=Screen::Identity)label(s.screen==Screen::Contacts?"No contacts / wait for announcements":"No messages yet",9,102,MUTED,1,37);
+  if(pages>1) {
+    button(8,240,55,25,"< PREV",CYAN);button(177,240,55,25,"NEXT >",CYAN);
+    snprintf(text,sizeof(text),"%u / %u",messagePage+1,pages);label(text,99,247,MUTED,1,12);
+  } else if(s.screen==Screen::Settings)label("Blank key restores the public default.",9,240,AMBER,1,37);
+  const char* notice=s.error[0]?s.error:m.notice[0]?m.notice:m.messages.status;
+  label(notice,9,267,AMBER,1,37);
+  button(8,280,224,32,s.screen==Screen::Menu||s.screen==Screen::Mode?"STOP MESSAGES / HOME":"< BACK",CYAN);
+}
+void messageBack() {
+  if(ui::messages::back(messageState,onAction)==ui::messages::Result::Exit)setPage(Page::Home);
+  messagePage=0;focusIndex=-1;dirty=true;
+}
+void messageTouch(uint16_t x,uint16_t y,const ui::Model& m) {
+  if(inside(x,y,8,280,224,32)) {messageBack();return;}
+  const unsigned count=ui::messages::count(messageState,m),visible=messageVisible();
+  const unsigned pages=std::max(1U,(count+visible-1)/visible);
+  if(pages>1 && inside(x,y,8,240,55,25)) {messagePage=(messagePage+pages-1)%pages;focusIndex=-1;return;}
+  if(pages>1 && inside(x,y,177,240,55,25)) {messagePage=(messagePage+1)%pages;focusIndex=-1;return;}
+  for(unsigned i=0;i<visible && messagePage*visible+i<count;++i)if(inside(x,y,8,int(messageRowStart()+i*34),224,30)) {
+    const auto result=ui::messages::choose(messageState,messagePage*visible+i,m,onAction);
+    messagePage=0;focusIndex=-1;
+    if(result==ui::messages::Result::Exit)setPage(Page::Home);
+    else if(result==ui::messages::Result::Edit) {messageEditor=true;eraseInput();keyPage=0;setPage(Page::Keyboard);}
+    break;
+  }
+}
+
 const char* keyRow(int row) {
   static const char* lower[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm", "1234567890", ""};
   static const char* upper[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM", "1234567890", ""};
@@ -487,20 +578,23 @@ const char* keyRow(int row) {
 }
 
 void drawKeyboard() {
-  heading("ENTER VALUE / LOCAL SD STORAGE");
+  heading(messageEditor&&messageState.composing?"COMPOSE / SEND ON SELECTED MESH":"ENTER VALUE / LOCAL SD STORAGE");
   if (!buffered) gfx().fillRect(0, 110, FRAME_WIDTH, 134, BG);
-  label(fields[field], 9, 50, GREEN, 1, 36);
+  label(messageEditor?(messageState.error[0]?messageState.error:ui::messages::editTitle(messageState)):fields[field], 9, 50, messageEditor&&messageState.error[0]?AMBER:GREEN, 1, 36);
   gfx().fillRoundRect(8, 66, 224, 36, 3, PANEL);
   gfx().drawRoundRect(8, 66, 224, 36, 3, BORDER);
   char view[35]{};
   const size_t visible = std::min(inputSize, size_t{33});
-  const bool secret = field == 1 || field == 2 || field == 4;
+  const bool secret = messageEditor?ui::messages::secret(messageState):field == 1 || field == 2 || field == 4;
   if (secret) memset(view, '*', visible);
   else memcpy(view, input + inputSize - visible, visible);
-  label(inputSize ? view : "Tap keys below...", 14, 74, inputSize ? WHITE : MUTED, 1, 34);
+  if(messageEditor && messageState.composing) {
+    if(!inputSize)label("Tap keys below...",14,74,MUTED,1,34);
+    for(size_t offset=0;offset<inputSize;offset+=35)label(input+offset,14,69+int(offset/35)*8,WHITE,1,std::min(size_t{35},inputSize-offset));
+  } else label(inputSize ? view : messageEditor&&secret?"Blank = public default":messageEditor&&messageState.setting==1?"Blank = AUTO / current preset":"Tap keys below...", 14, 74, inputSize ? WHITE : MUTED, 1, 34);
   char length[24];
-  snprintf(length, sizeof(length), "%u / 127 characters", static_cast<unsigned>(inputSize));
-  label(length, 14, 89, MUTED, 1, 34);
+  snprintf(length, sizeof(length), "%u / %u characters", static_cast<unsigned>(inputSize),unsigned(messageEditor?ui::messages::editLimit(messageState):127));
+  if(!(messageEditor&&messageState.composing))label(length, 14, 89, MUTED, 1, 34);
   for (int row = 0; row < 5; ++row) {
     const char* keys = keyRow(row);
     for (int col = 0; keys[col]; ++col) {
@@ -514,11 +608,11 @@ void drawKeyboard() {
   button(86, 247, 68, 26, keyPage == 2 ? "letters" : "#+=", CYAN);
   button(164, 247, 68, 26, "< DEL", AMBER);
   button(8, 282, 108, 30, "CANCEL", CYAN);
-  button(124, 282, 108, 30, "SAVE TO SD", GREEN);
+  button(124, 282, 108, 30, messageEditor&&messageState.composing?"SEND ONCE":"SAVE TO SD", GREEN);
 }
 
 void append(char value) {
-  if (inputSize < sizeof(input) - 1) {
+  if (inputSize < (messageEditor?ui::messages::editLimit(messageState):sizeof(input)-1)) {
     input[inputSize++] = value;
     input[inputSize] = 0;
     dirty = true;
@@ -541,7 +635,11 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
       setPage(reconChoice ? Page::Recon : Page::Wardriver);
     } else if (inside(x, y, 8, 208, 224, 34)) {
       settingsParent = page; setPage(Page::Settings);
+    } else if(inside(x,y,8,246,224,28)) {
+      ui::messages::open(messageState,m);messagePage=0;setPage(Page::Messages);
     }
+  } else if(page==Page::Messages) {
+    messageTouch(x,y,m);
   } else if (page == Page::Wardriver || page == Page::Recon) {
     if (page == Page::Wardriver) {
       for (int i = 0; i < 3; ++i) if (inside(x, y, 8 + i * 76, 78, 72, 26)) tab = i;
@@ -623,7 +721,7 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
     }
   } else if (page == Page::Credentials) {
     for (int i = 0; i < 5; ++i) if (inside(x, y, 8, 48 + i * 34, 224, 29)) {
-      eraseInput(); field = i; keyPage = 0; setPage(Page::Keyboard);
+      messageEditor=false;eraseInput(); field = i; keyPage = 0; setPage(Page::Keyboard);
     }
     if (inside(x, y, 8, 280, 108, 32)) setPage(Page::Settings);
     if (inside(x, y, 124, 280, 108, 32) && onAction) onAction(ui::Action::RetryStorage, 0, "");
@@ -637,10 +735,14 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
     if (inside(x, y, 8, 247, 68, 26)) { keyPage = keyPage == 1 ? 0 : 1; focusIndex = -1; }
     if (inside(x, y, 86, 247, 68, 26)) { keyPage = keyPage == 2 ? 0 : 2; focusIndex = -1; }
     if (inside(x, y, 164, 247, 68, 26) && inputSize) input[--inputSize] = 0;
-    if (inside(x, y, 8, 282, 108, 30)) { eraseInput(); setPage(Page::Credentials); }
+    if (inside(x, y, 8, 282, 108, 30)) { eraseInput(); setPage(messageEditor?Page::Messages:Page::Credentials);messageEditor=false; }
     if (inside(x, y, 124, 282, 108, 30)) {
-      if (onAction) onAction(ui::Action::SaveCredential, field, input);
-      eraseInput(); setPage(Page::Credentials);
+      if(messageEditor) {
+        if(ui::messages::submit(messageState,input,m,onAction)) {eraseInput();messageEditor=false;messagePage=0;setPage(Page::Messages);}
+      } else {
+        if (onAction) onAction(ui::Action::SaveCredential, field, input);
+        eraseInput(); setPage(Page::Credentials);
+      }
     }
   }
   dirty = true;
@@ -648,7 +750,8 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
 
 void back() {
   if(powerDialog) { powerDialog=false; fullClearNeeded=true; dirty=true; return; }
-  if (page == Page::Keyboard) { eraseInput(); setPage(Page::Credentials); }
+  if (page == Page::Keyboard) { eraseInput(); setPage(messageEditor?Page::Messages:Page::Credentials);messageEditor=false; }
+  else if(page==Page::Messages)messageBack();
   else if(page==Page::MeshChoice) {setPage(Page::MeshSettings);focusIndex=int(meshField);}
   else if(page==Page::MeshSettings) {setPage(Page::Settings);focusIndex=3;}
   else if(page==Page::Credentials) setPage(Page::Settings);
@@ -670,6 +773,12 @@ size_t focusTargets(const ui::Model& m, Rect targets[MAX_TARGETS]) {
   }
   if (page == Page::Home) {
     add(8, 84, 224, 52); add(8, 146, 224, 52); add(8, 208, 224, 34);
+    add(8,246,224,28);
+  } else if(page==Page::Messages) {
+    const unsigned items=ui::messages::count(messageState,m),visible=messageVisible();
+    for(unsigned i=0;i<visible && messagePage*visible+i<items;++i)add(8,int(messageRowStart()+i*34),224,30);
+    if(items>visible) {add(8,240,55,25);add(177,240,55,25);}
+    add(8,280,224,32);
   } else if (page == Page::Wardriver || page == Page::Recon) {
     if (page == Page::Wardriver) {
       for (int i = 0; i < 3; ++i) add(8 + i * 76, 78, 72, 26);
@@ -747,7 +856,7 @@ void keyboard(const input::KeyEvent&, const Model&) {}
 uint32_t inputLatencyP95Ms() { return 0; }
 uint32_t inputLatencyMaxMs() { return 0; }
 uint32_t inputLatencySamples() { return 0; }
-bool allowsBackgroundUpload() { return page != Page::Keyboard && page != Page::MeshSettings && page != Page::MeshChoice; }
+bool allowsBackgroundUpload() { return page != Page::Messages && page != Page::Keyboard && page != Page::MeshSettings && page != Page::MeshChoice; }
 bool allowsUploadJobPolling() { return allowsBackgroundUpload(); }
 void begin(Handler handler) {
   onAction = handler;
@@ -758,6 +867,7 @@ void begin(Handler handler) {
   powerDialog=false; onboardingShown=false; regionOnboarding=false;
   tab = 0; reconFilter = 0; reconPage = 0;
   meshField=meshChoice=0;
+  messageState=ui::messages::State{};messagePage=0;messageEditor=false;
   focusIndex = -1; focusVisible = false;
   previousFocusDrawn = false;
   eraseInput();
@@ -861,6 +971,7 @@ void tick(const Model& model) {
   else if (page == Page::Settings) settings(model);
   else if (page == Page::MeshSettings) meshSettings(model);
   else if (page == Page::MeshChoice) meshChoices(model);
+  else if(page==Page::Messages)messageScreen(model);
   else if (page == Page::Credentials) credentials(model);
   else if (page == Page::Regions) regions(model);
   else drawKeyboard();

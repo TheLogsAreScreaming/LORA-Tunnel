@@ -195,6 +195,7 @@ void seedDocument(JsonDocument& document) {
   document["uploads"]["wdgwars"]=config.auto_wdgwars;
   document["schedule"]["wifi_dwell_ms"]=config.wifi_dwell_ms;
   document["schedule"]["ble_window_ms"]=config.ble_window_ms;
+  messaging::writeSettings(document.as<JsonVariant>(),config.messages);
   const char* values[]={config.wigle_name,config.wigle_token,config.wdgwars_token,config.wifi_name,config.wifi_password,config.wardrift_token};
   for(size_t i=0;i<6;++i) document["credentials"][credentialKeys[i]]=values[i];
 }
@@ -206,7 +207,7 @@ bool prepareSave(JsonDocument& document,void* buffer) {
     if(sourceOpenFailed || configAllocationFailed) return false;
     // Runtime keys omit their display names. Do not silently drop either key
     // list if the original SD documents disappear after a successful load.
-    if(config.mesh_key_count || config.meshcore_key_count) {sourceOpenFailed=true;return false;}
+    if(config.mesh_key_count || config.meshcore_key_count || config.messages.meshtastic_key_length || config.messages.meshcore_key_length) {sourceOpenFailed=true;return false;}
     seedDocument(document);
   }
   return mainValid;
@@ -219,7 +220,10 @@ bool commitPrepared(JsonDocument& document,bool mainValid,const char* key,const 
     return false;
   };
   RadioSettings candidate;
+  messaging::Settings expectedMessages,readMessages;
   if(sourceOpenFailed || configAllocationFailed || document.overflowed() || !parseConfigRadio(document.as<JsonVariantConst>(),candidate)) return fail();
+  const bool expectedPublicDecode=document["lora"]["decode_public"] | true;
+  if(!messaging::parseSettings(document.as<JsonVariantConst>(),expectedMessages))return fail();
   const size_t expected=measureJson(document);
   if(expected>16384) return fail();
   ConfigFile f;
@@ -231,6 +235,12 @@ bool commitPrepared(JsonDocument& document,bool mainValid,const char* key,const 
 #endif
   const bool closed=closeFile(f);
   if(!ok || !closed || !read(document,tempPath,buffer))return fail();
+  // A syntactically valid readback can still be stale. Never report success or
+  // rotate the original unless the radio settings we read are those requested.
+  if(!sameRadioSettings(candidate,radioSettings) ||
+     (document["lora"]["decode_public"] | true)!=expectedPublicDecode)return fail();
+  if(!messaging::parseSettings(document.as<JsonVariantConst>(),readMessages)||
+      !messaging::sameSettings(expectedMessages,readMessages))return fail();
   if(key) {
     const char* saved=document["credentials"][key];
     if(!saved || strcmp(saved,value)) return fail();
@@ -250,6 +260,7 @@ bool commitPrepared(JsonDocument& document,bool mainValid,const char* key,const 
     parseMeshKeys(document["lora"],config.mesh_keys,config.mesh_key_count,config.decode_public);
     parseMeshCoreKeys(document["lora"],config.meshcore_keys,config.meshcore_key_count);
   }
+  config.messages=readMessages;
   document.clear();
   return true;
 }
@@ -300,6 +311,7 @@ bool loadConfig() {
   if (loaded) {
     configLoadState=primary ? ConfigLoadState::Primary : ConfigLoadState::Backup;
     applyRadioSettings();
+    messaging::parseSettings(document.as<JsonVariantConst>(),config.messages);
     auto radio = document["lora"];
     config.lna = radio["lna"] | false;
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
@@ -439,6 +451,33 @@ bool saveMeshtasticSlot(uint16_t slot) {return saveMeshSetting(MeshSetting::Slot
 bool saveMeshCoreProfile(const char* name) {return saveMeshSetting(MeshSetting::MeshCore,name,0);}
 bool saveLoRaDwell(uint32_t milliseconds) {return saveMeshSetting(MeshSetting::Dwell,nullptr,milliseconds);}
 bool savePublicDecode(bool enabled) {return saveMeshSetting(MeshSetting::PublicDecode,nullptr,enabled);}
+bool saveMessagingSetting(int field,const char* value) {
+  if(field<0||field>4||!value)return false;
+  configAllocationFailed=false;sourceOpenFailed=false;
+  ScopedConfigDocument operation;
+  auto& document=operation.document;
+  if(document.capacity()<documentCapacity){configAllocationFailed=true;return false;}
+  const bool mainValid=prepareSave(document,operation.fileBuffer());
+  messaging::Settings settings;
+  if(!messaging::parseSettings(document.as<JsonVariantConst>(),settings))return false;
+  if(field==0){
+    if(!messaging::printable(value,31)||strchr(value,':'))return false;
+    strcpy(settings.name,value);
+  }else if(field==1){
+    if(!messaging::printable(value,39,true))return false;
+    strcpy(settings.meshtastic_channel,value);
+  }else if(field==2){
+    if(!messaging::readHex(value,settings.meshtastic_key,settings.meshtastic_key_length))return false;
+  }else if(field==3){
+    if(!messaging::readHex(value,settings.meshcore_key,settings.meshcore_key_length))return false;
+  }else{
+    if(strlen(value)!=1||value[0]<'0'||value[0]>'7')return false;
+    settings.hop_limit=uint8_t(value[0]-'0');
+  }
+  messaging::writeSettings(document.as<JsonVariant>(),settings);
+  if(!commitPrepared(document,mainValid,nullptr,nullptr,nullptr,nullptr,false,operation.fileBuffer()))return false;
+  configLoadState=ConfigLoadState::Primary;return true;
+}
 RegionSaveResult saveLoRaRegion(const char* code,bool sdMounted) {
   configAllocationFailed=false; sourceOpenFailed=false;
   RegionSaveResult result;

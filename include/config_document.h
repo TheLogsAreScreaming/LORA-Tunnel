@@ -7,6 +7,7 @@
 #include "lora_profiles.h"
 #include "lora_scan.h"
 #include "mesh_config.h"
+#include "messaging_config.h"
 
 namespace tunnel {
 
@@ -24,12 +25,25 @@ struct RadioSettings {
   char meshcore_profile[32]="AUTO";
 };
 
+inline bool sameRadioSettings(const RadioSettings& a,const RadioSettings& b) {
+  return a.enabled==b.enabled && a.selection_complete==b.selection_complete &&
+      a.hardware_compatible==b.hardware_compatible &&
+      std::fabs(a.frequency-b.frequency)<0.00000001 &&
+      std::fabs(a.bandwidth-b.bandwidth)<0.00000001 &&
+      a.sf==b.sf && a.cr==b.cr && a.preamble==b.preamble &&
+      !std::strcmp(a.region,b.region) && a.mode==b.mode && a.dwell_ms==b.dwell_ms &&
+      !std::strcmp(a.meshtastic_preset,b.meshtastic_preset) &&
+      a.meshtastic_slot==b.meshtastic_slot && !std::strcmp(a.meshcore_profile,b.meshcore_profile);
+}
+
 // A parseable schema marker alone is insufficient for primary/backup rotation.
 // Every config read must also contain a usable radio section, even when disabled.
 inline bool parseConfigRadio(JsonVariantConst root, RadioSettings& result) {
   if (!root.is<JsonObjectConst>() || !root["schema"].is<std::uint32_t>() ||
       root["schema"].as<std::uint32_t>() != 1 || !root["lora"].is<JsonObjectConst>()) return false;
   const JsonObjectConst radio = root["lora"];
+  messaging::Settings messages;
+  if(!messaging::parseSettings(root,messages))return false;
   if (!radio["enabled"].is<bool>()) return false;
   if(radio.containsKey("selection_complete") && !radio["selection_complete"].is<bool>()) return false;
   if (radio.containsKey("lna") && !radio["lna"].is<bool>()) return false;

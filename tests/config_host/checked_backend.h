@@ -42,7 +42,7 @@ inline size_t checkedWrite(const void* data,size_t size,size_t count,FILE* f){
   std::memcpy(&value[h.pos],data,n);h.pos+=n;return count;
 }
 inline int checkedError(FILE* f){return handle(f).error;}
-inline int checkedFlush(FILE* f){if(fault(failFlushPath,handle(f).path)){errno=EIO;return -1;}return 0;}
+inline int checkedFlush(FILE* f){if(fileHooks().afterFlush)fileHooks().afterFlush(handle(f).path);if(fault(failFlushPath,handle(f).path)){errno=EIO;return -1;}return 0;}
 inline int checkedDescriptor(FILE* f){return handle(f).id;}
 inline int checkedSync(int fd){if(fault(failSyncPath,checkedHandles.at(fd)->path)){errno=EIO;return -1;}return 0;}
 inline int checkedClose(FILE* f){auto* h=&handle(f);const bool fail=fault(failClosePath,h->path);checkedHandles.erase(h->id);delete h;if(fail){errno=EIO;return -1;}return 0;}

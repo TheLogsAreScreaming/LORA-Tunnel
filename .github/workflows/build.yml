@@ -11,6 +11,10 @@ permissions:
 jobs:
   firmware-and-parsers:
     runs-on: ubuntu-24.04
+    env:
+      # Portable host-test dependency only; production keeps its pinned ESP32 SDK.
+      MESSAGING_MBEDTLS_DIR: ${{ github.workspace }}/build-output/host-deps/mbedtls-3.6.1
+      MESSAGING_MBEDTLS_REV: 71c569d44bf3a8bd53d874c81ee8ac644dd6e9e3 # official v3.6.1, peeled commit
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -43,8 +47,25 @@ jobs:
         run: python -m platformio run -e heltec-v4-r8-tft
       - name: Compile Cardputer ADV with Cap LoRa-1262
         run: python -m platformio run -e cardputer-adv-lora1262
+      - name: Fetch pinned portable Mbed TLS for messaging host tests
+        shell: bash
+        run: |
+          mkdir -p "$(dirname "$MESSAGING_MBEDTLS_DIR")"
+          git init "$MESSAGING_MBEDTLS_DIR"
+          git -C "$MESSAGING_MBEDTLS_DIR" remote add origin https://github.com/Mbed-TLS/mbedtls.git
+          git -C "$MESSAGING_MBEDTLS_DIR" fetch --no-tags --depth=1 origin "$MESSAGING_MBEDTLS_REV"
+          git -C "$MESSAGING_MBEDTLS_DIR" checkout --detach FETCH_HEAD
+          test "$(git -C "$MESSAGING_MBEDTLS_DIR" rev-parse HEAD)" = "$MESSAGING_MBEDTLS_REV"
       - name: Independent encrypted and signed mesh packet fixtures
         run: python tools/check_mesh_crypto.py
+      - name: Meshtastic messaging wire and production crypto fixtures
+        run: python tools/check_meshtastic_message.py
+      - name: MeshCore messaging wire and production crypto fixtures
+        run: python tools/check_meshcore_message.py
+      - name: Messaging engine lifecycle, trust, persistence and receipts
+        run: python tools/check_messaging.py
+      - name: Messaging radio ownership and transmit failure recovery
+        run: python tools/check_messaging_radio.py
       - name: Cardputer linker policy and real pinned SDK drift checks
         run: python -m unittest discover -s tests -p test_cardputer_linker.py -v
       - name: Cardputer keyboard mapping against pinned upstream headers

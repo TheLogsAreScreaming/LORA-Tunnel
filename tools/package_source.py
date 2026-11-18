@@ -25,6 +25,31 @@ EXCLUDED_DIRS = {"__pycache__", "node_modules", ".git", ".venv", "dist", "build"
                  "site", "private", ".wrangler", ".cache"}
 
 
+def validate_public_messaging(sample):
+    """Reject configured messaging keys without ever echoing their values.
+
+    Historical source packages predate this section and remain accepted. An
+    explicitly malformed section is not equivalent to an absent legacy one.
+    """
+    section = sample.get("messaging", {})
+    if not isinstance(section, dict):
+        raise ValueError("Source example messaging section must be an object")
+    if any(section.get(name, "") != "" for name in ("meshtastic_key_hex", "meshcore_key_hex")):
+        raise ValueError("Source example messaging keys must be empty; keep channel keys on the private SD card")
+    allowed = {"name", "meshtastic_channel", "meshtastic_key_hex", "meshcore_key_hex", "hop_limit"}
+    if set(section) - allowed:
+        raise ValueError("Source example messaging contains unsupported fields; retain only public starter settings")
+
+
+def validate_messaging_license(paths):
+    """Require the vendored primitive's notices when its source is shipped."""
+    paths = set(paths)
+    prefix = "lib/meshdecode/src/meshcore_ed25519/"
+    if prefix + "key_exchange.c" in paths:
+        if not {prefix + "license.txt", prefix + "README.md"} <= paths:
+            raise ValueError("Messaging primitive source requires its license and provenance notice")
+
+
 
 def collect_paths(root=ROOT):
     """Resolve the public source inventory without creating an archive."""
@@ -37,6 +62,7 @@ def collect_paths(root=ROOT):
         raise ValueError("Source example credentials must all be empty; keep real values on the private SD card")
     if any(sample.get("lora", {}).get(name, []) != [] for name in ("meshtastic_keys", "meshcore_keys")):
         raise ValueError("Source example mesh keys must be empty; keep channel keys on the private SD card")
+    validate_public_messaging(sample)
     rules = json.loads((root / "sdcard/lora-tunnel/detection_rules.json").read_text(encoding="utf-8"))
     if rules.get("schema") != 1 or rules.get("rules") != []:
         raise ValueError("The packaged detection_rules.json must retain its empty rules array")
@@ -53,6 +79,7 @@ def collect_paths(root=ROOT):
         if path.resolve() != path.absolute():
             raise ValueError("Source inventory contains a linked path; refusing to follow it")
         path.resolve().relative_to(root)
+    validate_messaging_license(p.relative_to(root).as_posix() for p in paths)
     return sorted(set(paths))
 
 

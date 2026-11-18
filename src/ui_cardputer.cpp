@@ -3,6 +3,7 @@
 #include "hardware.h"
 #include "lora_profiles.h"
 #include "ui_mesh_settings.h"
+#include "ui_messages.h"
 #include "version.h"
 #include "credential_validation.h"
 #include "cardputer_logo_pixels.h"
@@ -21,7 +22,9 @@ constexpr const char* fields[]={"WiGLE API name","WiGLE API token","WDGWars toke
   "Home Wi-Fi SSID","Home Wi-Fi password","Wardrift API token"};
 constexpr const char* categories[]={"ALL","ALPR","FLOCK","BODYCAM","IBEACON","RING",
   "CAMERAS","DRONES","FIND MY","TRACKERS","GLASSES","ACOUSTIC","SERIAL","RADIO TOOLS","CUSTOM"};
-enum class Page { Home, Drive, Recon, Detail, Settings, Credentials, Edit, Regions, Power, Uploads, MeshSettings, MeshChoice };
+enum class Page { Home, Drive, Recon, Detail, Settings, Credentials, Edit, Regions, Power, Uploads, MeshSettings, MeshChoice, Messages };
+ui::messages::State messageState;
+bool messageEditor=false;
 Page page=Page::Home, settingsParent=Page::Home;
 ui::Handler handler=nullptr;
 lgfx::LGFX_Sprite canvas;
@@ -110,10 +113,11 @@ void openRegions(const ui::Model& m,bool first) {
   show(Page::Regions);
 }
 void back(const ui::Model& m) {
+  if(page==Page::Messages) {if(ui::messages::back(messageState,handler)==ui::messages::Result::Exit)show(Page::Home);else show(Page::Messages);return;}
   if(page==Page::MeshChoice) { show(Page::MeshSettings);focus=meshField;return; }
   if(page==Page::MeshSettings) { show(Page::Settings);focus=6;return; }
   if(page==Page::Power) { show(Page::Settings); return; }
-  if(page==Page::Edit) { eraseInput(); show(Page::Credentials); return; }
+  if(page==Page::Edit) { eraseInput(); show(messageEditor?Page::Messages:Page::Credentials);messageEditor=false;return; }
   if(page==Page::Credentials || page==Page::Uploads) { show(Page::Settings); return; }
   if(page==Page::Regions) {
     if(regionOnboarding && !m.running) emit(ui::Action::SaveRegion,0,"UNSET");
@@ -123,8 +127,9 @@ void back(const ui::Model& m) {
   if(page==Page::Detail) { show(Page::Recon); return; }
   show(Page::Home);
 }
-unsigned menuCount() {
-  if(page==Page::Home)return 3;
+unsigned menuCount(const ui::Model& m) {
+  if(page==Page::Messages)return ui::messages::count(messageState,m);
+  if(page==Page::Home)return 4;
   if(page==Page::Settings)return 7;
   if(page==Page::MeshSettings)return ui::mesh_settings::FieldCount;
   if(page==Page::Credentials)return sizeof(fields)/sizeof(fields[0]);
@@ -134,7 +139,12 @@ unsigned menuCount() {
 }
 void select(const ui::Model& m) {
   if(page==Page::Home) {
-    if(focus<2)openMode(focus==1,m); else openSettings();
+    if(focus<2)openMode(focus==1,m);else if(focus==2)openSettings();else {ui::messages::open(messageState,m);show(Page::Messages);}
+  } else if(page==Page::Messages) {
+    const auto result=ui::messages::choose(messageState,focus,m,handler);
+    if(result==ui::messages::Result::Exit)show(Page::Home);
+    else if(result==ui::messages::Result::Edit) {messageEditor=true;eraseInput();editError[0]=0;show(Page::Edit);}
+    else show(Page::Messages);
   } else if(page==Page::Settings) {
     if(focus==0)openRegions(m,false);
     else if(focus==1)show(Page::Credentials);
@@ -148,8 +158,12 @@ void select(const ui::Model& m) {
   } else if(page==Page::MeshChoice) {
     if(ui::mesh_settings::save(meshField,meshChoice,m,handler)) {show(Page::MeshSettings);focus=meshField;}
   } else if(page==Page::Credentials) {
-    editField=focus; eraseInput(); editError[0]=0; show(Page::Edit);
+    messageEditor=false;editField=focus; eraseInput(); editError[0]=0; show(Page::Edit);
   } else if(page==Page::Edit) {
+    if(messageEditor) {
+      if(ui::messages::submit(messageState,inputValue,m,handler)) {eraseInput();messageEditor=false;show(Page::Messages);}
+      return;
+    }
     if(!tunnel::validCredential(int(editField),inputValue)) {
       const char* error=editField==3?"SSID: at most 32 bytes":editField==4?"Password: 8-63 chars, 64 hex, or blank":editField==0?"API name: no colon or control chars":"Use printable text, at most 127 bytes";
       snprintf(editError,sizeof(editError),"%s",error);return;
@@ -192,7 +206,7 @@ void move(int delta,const ui::Model& m) {
     uint8_t indices[8]; const unsigned count=matches(m,indices);
     if(count)selectedMatch=(selectedMatch+count+delta)%count;
   } else {
-    const unsigned count=menuCount(); if(count)focus=(focus+count+delta)%count;
+    const unsigned count=menuCount(m); if(count)focus=(focus+count+delta)%count;
   }
 }
 void drawMenu(const char* const* names,unsigned count,unsigned visible=4) {
@@ -204,8 +218,64 @@ void wrapped(const char* text,int y,size_t capacity,uint16_t color) {
   const size_t length=strnlen(text,capacity);
   for(size_t offset=0;offset<length;offset+=38)label(text+offset,5,y+int(offset/38)*10,color,std::min(size_t{38},length-offset));
 }
+void drawMessages(const ui::Model& m) {
+  using ui::messages::Screen;
+  auto& s=messageState;header(ui::messages::title(s));
+  ui::messages::refreshRecord(s,m);
+  char text[80];
+  const auto contactView=s.screen==Screen::Contact||s.screen==Screen::Trust;
+  if(contactView && m.messages.contacts && s.selected<std::min(unsigned(m.messages.contact_count),8U)) {
+    const auto& current=m.messages.contacts[s.selected];
+    if(current.node==s.contact.node && current.protocol==s.contact.protocol)s.contact=current;
+  }
+  if(s.screen==Screen::Identity) {
+    label(m.messages.name,4,26,GREEN,38);label(m.messages.channel,4,39,CYAN,38);
+    label(m.profile,4,52,WHITE,38);
+    wrapped(m.messages.identity,67,sizeof(m.messages.identity),MUTED);
+    label(m.messages.identity_ready?"Compare identity before private chat":"Identity unavailable / TX disabled",4,102,m.messages.identity_ready?GREEN:AMBER,38);
+    footer("Esc return to Messages",m,false);return;
+  }
+  if(s.screen==Screen::Detail) {
+    snprintf(text,sizeof(text),"%s / %s",s.record.name[0]?s.record.name:"Channel",s.record.direct?"PRIVATE":"CHANNEL");
+    label(text,4,26,CYAN,38);label(tunnel::messaging::deliveryName(s.record.delivery),4,38,s.record.delivery==tunnel::messaging::Delivery::Delivered?GREEN:AMBER,38);
+    wrapped(s.record.text,51,sizeof(s.record.text),WHITE);
+    label(s.record.authenticated?"Authenticated message":"Sender identity not authenticated",4,98,s.record.authenticated?GREEN:AMBER,38);
+    footer("Esc return to inbox",m,false);return;
+  }
+  if(s.screen==Screen::Contact || s.screen==Screen::Trust) {
+    snprintf(text,sizeof(text),"%s !%08lX",s.contact.name,(unsigned long)s.contact.node);
+    label(text,4,26,CYAN,38);
+    char key[65];ui::messages::fingerprint(s.contact,key);
+    label(key,4,39,MUTED,32);label(key+32,4,49,MUTED,32);
+    label(s.error[0]?s.error:s.contact.key_changed?"KEY CHANGED - verify again":s.contact.trusted?"Trusted public key":"Compare key with owner before trust",4,60,s.error[0]||s.contact.key_changed?AMBER:GREEN,38);
+    const unsigned count=ui::messages::count(s,m);focus=std::min(focus,count-1);
+    for(unsigned i=0;i<count;++i) {ui::messages::row(s,i,m,text,sizeof(text));row(72+int(i)*16,text,focus==i);}
+    footer(s.screen==Screen::Trust?"Enter confirms only the selected row":"Up/Down choose  Enter  Esc back",m,false);
+    return;
+  }
+  if(s.screen==Screen::TxConfirm) {
+    label("Send only on the selected mesh.",4,28,WHITE,38);
+    label("TX starts OFF for each session.",4,41,MUTED,38);
+    label(m.profile,4,54,CYAN,38);
+    for(unsigned i=0;i<2;++i) {ui::messages::row(s,i,m,text,sizeof(text));row(74+int(i)*19,text,focus==i,i?AMBER:WHITE);}
+    footer("Up/Down choose  Enter apply  Esc back",m,false);return;
+  }
+  if(s.screen==Screen::Mode)label(m.running?"Stop + save capture before messaging":"One radio / choose one protocol",4,26,m.running?AMBER:MUTED,38);
+  else {snprintf(text,sizeof(text),"%s / %s / TX %s",ui::messages::protocolName(m.messages.protocol),m.messages.active?"ACTIVE":"STOPPED",m.messages.tx_enabled?"ON":"OFF");label(text,4,26,m.messages.tx_enabled?AMBER:CYAN,38);}
+  const unsigned count=ui::messages::count(s,m);if(count)focus=std::min(focus,count-1);
+  const unsigned start=focus/3*3;
+  for(unsigned i=0;i<3 && start+i<count;++i) {ui::messages::row(s,start+i,m,text,sizeof(text));row(39+int(i)*18,text,focus==start+i);}
+  if(count>3) {snprintf(text,sizeof(text),"%u/%u",focus/3+1,(count+2)/3);label(text,200,7,MUTED,3);}
+  if(!count)label(s.screen==Screen::Contacts?"No contacts / wait for announcements":"No messages yet",4,50,MUTED,38);
+  if(s.screen==Screen::Settings)label("Keys: blank resets to public default",4,96,AMBER,38);
+  else if(s.screen==Screen::Menu) {snprintf(text,sizeof(text),"%.17s / %.18s",m.messages.channel,m.profile);label(text,4,96,MUTED,38);}
+  else label(m.messages.status,4,96,MUTED,38);
+  label(s.error[0]?s.error:m.notice[0]?m.notice:m.messages.status,4,110,AMBER,38);
+  footer(s.screen==Screen::Menu||s.screen==Screen::Mode?"Up/Down Enter open  Esc stop / Home":"Up/Down choose  Enter  Esc back",m,false);
+}
 void render(const ui::Model& m) {
   char text[80];
+  if(page==Page::Messages) {drawMessages(m);return;}
   if(m.shutting_down || page==Page::Power) {
     header("POWER");
     label(m.shutting_down?"Saving session before sleep...":"Stop capture, save, then sleep?",4,30,AMBER,38);
@@ -217,10 +287,9 @@ void render(const ui::Model& m) {
   }
   if(page==Page::Home) {
     header("HOME"); status(m);
-    const char* names[]={"WARDRIVER / Wi-Fi + BLE + LoRa","RECON / indicators + evidence","SETTINGS / device + uploads"};
-    drawMenu(names,3);
-    label(m.gps_detail[0]?m.gps_detail:"GNSS: waiting for data / fix",4,96,MUTED,38);
-    footer("W Drive  R Recon  S Setup  Enter open",m);
+    const char* names[]={"WARDRIVER / Wi-Fi + BLE + LoRa","RECON / indicators + evidence","SETTINGS / device + uploads","MESSAGES / Meshtastic + MeshCore"};
+    drawMenu(names,4);
+    footer("W Drive  R Recon  S Setup  C Messages",m);
   } else if(page==Page::Drive) {
     header("DRIVE"); status(m);
     const uint32_t totals[]={m.wifi,m.ble,m.lora}; const char* names[]={"Wi-Fi","BLE","LoRa"};
@@ -288,15 +357,23 @@ void render(const ui::Model& m) {
     header("KEYS"); label("Enter a replacement; saved on SD.",4,26,MUTED,38);
     drawMenu(fields,sizeof(fields)/sizeof(fields[0])); footer("Up/Down choose  Enter edit  Esc back",m);
   } else if(page==Page::Edit) {
-    header("EDIT KEY"); label(fields[editField],4,27,GREEN,38);
+    header(messageEditor&&messageState.composing?"COMPOSE":"EDIT KEY"); label(messageEditor?ui::messages::editTitle(messageState):fields[editField],4,27,GREEN,38);
+    if(messageEditor && messageState.composing) {
+      gfx().fillRoundRect(3,43,234,49,3,PANEL);
+      wrapped(inputLength?inputValue:"Type on the keyboard...",47,sizeof(inputValue),inputLength?WHITE:MUTED);
+      snprintf(text,sizeof(text),"%u / 120  TX %s",unsigned(inputLength),m.messages.tx_enabled?"ON":"OFF");label(text,4,98,MUTED,38);
+      if(messageState.error[0])label(messageState.error,4,110,AMBER,38);
+      footer("Enter SEND once  Esc discard",m,false);return;
+    }
     gfx().fillRoundRect(3,43,234,25,3,PANEL);
     char view[38]{}; const size_t visible=std::min(inputLength,size_t{37});
-    const bool secret=editField==1 || editField==2 || editField==4 || editField==5;
+    const bool secret=messageEditor?ui::messages::secret(messageState):editField==1 || editField==2 || editField==4 || editField==5;
     if(secret)memset(view,'*',visible); else memcpy(view,inputValue+inputLength-visible,visible);
     label(inputLength?view:"Type on the keyboard...",8,52,inputLength?WHITE:MUTED,37);
-    snprintf(text,sizeof(text),"%u / 127 characters",unsigned(inputLength));label(text,4,75,MUTED,38);
-    label("Shift / Fn symbols; Backspace deletes",4,90,MUTED,38);
-    footer("Enter save to SD  Esc cancel",m,!editError[0]);
+    snprintf(text,sizeof(text),"%u / %u characters",unsigned(inputLength),unsigned(messageEditor?ui::messages::editLimit(messageState):127));label(text,4,75,MUTED,38);
+    label(messageEditor&&ui::messages::secret(messageState)?"Blank resets key to public default":messageEditor&&messageState.setting==1?"Blank = AUTO / current preset name":"Shift / Fn symbols; Backspace deletes",4,90,MUTED,38);
+    footer(messageEditor&&messageState.composing?"Enter SEND once  Esc discard":"Enter save to SD  Esc cancel",m,!editError[0]);
+    if(messageEditor && messageState.error[0])label(messageState.error,4,110,AMBER,38);
     if(editError[0])label(editError,4,110,AMBER,38);
   } else if(page==Page::Regions) {
     header("REGION");label("U214: 868-923 MHz LoRa receive",4,27,CYAN,38);
@@ -347,6 +424,7 @@ void begin(Handler onAction) {
   uiTask=xTaskGetCurrentTaskHandle();
   handler=onAction;page=settingsParent=Page::Home;focus=tab=filter=selectedMatch=editField=0;
   meshField=meshChoice=0;
+  messageState=ui::messages::State{};messageEditor=false;
   dirty=true;splashShown=onboarded=false;regionOnboarding=false;eraseInput();
   inputPending=false;inputMaximum=latencyCount=latencyNext=latencyTotal=0;
   if(!pixels)pixels=heap_caps_malloc(WIDTH*HEIGHT,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
@@ -386,7 +464,8 @@ void keyboard(const input::KeyEvent& event,const Model& model) {
   dirty=true;
   using input::KeyCode;KeyCode code=event.code;const char c=event.character;
   if(page==Page::Edit && code==KeyCode::Text) {
-    if(c>=32 && c<=126 && inputLength<sizeof(inputValue)-1) {inputValue[inputLength++]=c;inputValue[inputLength]=0;dirty=true;}
+    const size_t limit=messageEditor?ui::messages::editLimit(messageState):sizeof(inputValue)-1;
+    if(c>=32 && c<=126 && inputLength<limit) {inputValue[inputLength++]=c;inputValue[inputLength]=0;dirty=true;}
     return;
   }
   if(code==KeyCode::Text) {
@@ -395,6 +474,7 @@ void keyboard(const input::KeyEvent& event,const Model& model) {
     else if(c=='`')code=KeyCode::Back;
     else if(page==Page::Home && (c=='w'||c=='W')) {openMode(false,model);return;}
     else if(page==Page::Home && (c=='r'||c=='R')) {openMode(true,model);return;}
+    else if(page==Page::Home && (c=='c'||c=='C')) {ui::messages::open(messageState,model);show(Page::Messages);return;}
     else if((page==Page::Home || page==Page::Drive || page==Page::Recon) && (c=='s'||c=='S')) {openSettings();return;}
     else if((page==Page::Drive || page==Page::Recon) && c==' ') {
       if(model.recon==(page==Page::Recon))emit(Action::ToggleSession);dirty=true;return;
@@ -424,8 +504,8 @@ uint32_t inputLatencyP95Ms() {
 }
 uint32_t inputLatencyMaxMs() {return inputMaximum;}
 uint32_t inputLatencySamples() {return latencyTotal;}
-bool allowsBackgroundUpload() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Uploads && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
-bool allowsUploadJobPolling() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
+bool allowsBackgroundUpload() {return !scratchMemory && page!=Page::Messages && page!=Page::Edit && page!=Page::Credentials && page!=Page::Uploads && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
+bool allowsUploadJobPolling() {return !scratchMemory && page!=Page::Messages && page!=Page::Edit && page!=Page::Credentials && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
 void tick(const Model& model) {
   if(scratchMemory)return;
   if(!splashShown) {splash();present();splashShown=true;splashAt=millis();return;}

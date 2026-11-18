@@ -32,7 +32,7 @@ void alertTone(uint16_t frequencyHz, uint16_t durationMs);
 bool alertAudioReady();
 float batteryVolts();
 // Call only while SX1262 is in standby/RX, with DIO2 RF-switch control set up.
-// No transmit operation is provided by this hardware layer.
+// Messaging installs a persistent RadioLib table to select CTX/CSD on TX.
 void setLoRaFrontend(bool enabled, bool lna = false);
 // Software sleep only. Heltec POWER/S3 is an independent battery latch;
 // Cardputer has a physical switch and its cap GNSS supply is not MCU-switched.

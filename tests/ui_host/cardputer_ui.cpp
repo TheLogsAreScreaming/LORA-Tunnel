@@ -7,6 +7,7 @@
 #include <cstdint>
 std::uint32_t hostMillis=0;
 #include "../../src/ui_cardputer.cpp"
+#include "messaging_regression.h"
 
 namespace {
 unsigned assertions=0;
@@ -25,6 +26,52 @@ void capture(const char* directory,const char* name,ui::Model& model,bool repain
   out<<"]\n";expect(bool(out),"preview command file written");
 }
 bool screenHas(const char* text) {for(const auto& c:hw::display().commands)if(c.text.find(text)!=std::string::npos)return true;return false;}
+void messagingChecks(const char* output,ui::Model& m) {
+  ui_message_regression::run(expect);
+  using ui::messages::Screen;using tunnel::messaging::Delivery;using tunnel::mesh::Protocol;
+  m.notice[0]=0;m.running=false;m.upload_busy=false;m.messages={};
+  std::strcpy(m.profile,"US LongTurbo / 908.750 MHz");std::strcpy(m.messages.channel,"LongTurbo");std::strcpy(m.messages.name,"Example operator");
+  std::strcpy(m.messages.identity,"00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");m.messages.identity_ready=true;
+  show(Page::Home);textKey('c',m);expect(page==Page::Messages&&messageState.screen==Screen::Mode,"Home C opens separate message protocol selection");capture(output,"messages-protocol",m);
+  const auto before=sent.size();key(input::KeyCode::Select,m);
+  expect(sent.size()==before+1&&sent.back().action==ui::Action::StartMessages&&sent.back().field==1,"Meshtastic requires explicit start and never switches capture mode");
+  m.messages.active=true;capture(output,"messages-menu",m);expect(!ui::allowsBackgroundUpload()&&!ui::allowsUploadJobPolling(),"messaging suppresses network upload scheduling");
+  focus=4;const auto noTx=sent.size();key(input::KeyCode::Select,m);expect(messageState.screen==Screen::TxConfirm&&sent.size()==noTx,"TX cannot turn on from a single menu selection");capture(output,"messages-enable-tx",m);
+  key(input::KeyCode::Select,m);expect(sent.size()==noTx&&!m.messages.tx_enabled,"TX confirmation defaults to Cancel");
+  focus=4;key(input::KeyCode::Select,m);key(input::KeyCode::Down,m);key(input::KeyCode::Select,m);
+  expect(sent.back().action==ui::Action::ToggleMessageTx&&sent.back().field==1,"explicit TX confirmation enables current session only");m.messages.tx_enabled=true;
+  focus=1;key(input::KeyCode::Select,m);expect(page==Page::Edit&&messageEditor&&messageState.target==-1,"channel composer uses physical keyboard");
+  const char* punctuation="Hello, Mesh! : /;`@# ";for(const char* p=punctuation;*p;++p)textKey(*p,m);
+  expect(inputLength==strlen(punctuation),"compose punctuation does not become navigation");key(input::KeyCode::Backspace,m);
+  for(unsigned i=0;i<140;++i)textKey('x',m);expect(inputLength==120,"message composition caps text at120 bytes");capture(output,"messages-compose",m);
+  key(input::KeyCode::Select,m);expect(sent.back().action==ui::Action::SendMessage&&sent.back().field==-1&&sent.back().value.size()==120,"one Enter queues one channel message");expect(!inputLength&&!messageEditor,"sent text buffer wiped");
+  tunnel::messaging::Record records[6]{};tunnel::messaging::Contact contacts[8]{};
+  for(unsigned i=0;i<6;++i) {auto& r=records[i];r.protocol=Protocol::Meshtastic;r.id=100+i;r.outgoing=i>0;r.direct=i==3;r.delivery=static_cast<Delivery>(i);std::snprintf(r.name,sizeof(r.name),"Example peer %u",i);std::memset(r.text,'a'+i,120);}
+  for(unsigned i=0;i<8;++i) {auto& c=contacts[i];c.protocol=Protocol::Meshtastic;c.node=0x12340000+i;std::snprintf(c.name,sizeof(c.name),"Example contact %u",i);for(unsigned j=0;j<32;++j)c.public_key[j]=uint8_t(j+1+i);}
+  m.messages.history=records;m.messages.history_count=255;m.messages.contacts=contacts;m.messages.contact_count=255;
+  expect(ui::messages::count(messageState,m)==6,"malformed history count remains bounded by backing capacity");capture(output,"messages-inbox",m);focus=5;capture(output,"messages-inbox-more",m);
+  key(input::KeyCode::Select,m);expect(messageState.screen==Screen::Detail,"inbox selection opens full120-byte detail");capture(output,"messages-detail",m);
+  records[5].delivery=Delivery::ReceiptUnverified;capture(output,"messages-unverified-receipt",m);expect(screenHas("Receipt (unverified)"),"open detail tracks receipt changes without calling an unverified receipt Delivered");records[5].delivery=Delivery::Delivered;capture(output,"messages-delivered",m);expect(screenHas("Delivered"),"verified delivery can update an open detail view");
+  key(input::KeyCode::Back,m);key(input::KeyCode::Back,m);focus=2;key(input::KeyCode::Select,m);capture(output,"messages-contacts",m);focus=7;capture(output,"messages-contacts-more",m);focus=0;key(input::KeyCode::Select,m);
+  capture(output,"messages-contact",m);const auto untrusted=sent.size();key(input::KeyCode::Select,m);expect(page==Page::Messages&&sent.size()==untrusted&&messageState.error[0],"untrusted contact cannot open private composer");
+  focus=1;key(input::KeyCode::Select,m);expect(messageState.screen==Screen::Trust,"trust requires independent confirmation screen");capture(output,"messages-trust",m);
+  key(input::KeyCode::Down,m);key(input::KeyCode::Select,m);expect(sent.back().action==ui::Action::TrustContact&&sent.back().field==0&&sent.back().value.size()==64,"trust binds selected index and displayed full key");
+  contacts[0].trusted=true;capture(output,"messages-contact-trusted",m);focus=0;key(input::KeyCode::Select,m);expect(page==Page::Edit&&messageState.target==0,"trusted private target uses contact index");textKey('Q',m);const auto cancelled=sent.size();key(input::KeyCode::Back,m);expect(sent.size()==cancelled&&inputLength==0,"cancelled private draft emits nothing and wipes input");
+  contacts[0].key_changed=true;capture(output,"messages-key-changed",m);focus=0;key(input::KeyCode::Select,m);expect(page==Page::Messages&&messageState.error[0],"changed key blocks private compose despite prior trust");
+  messageState.screen=Screen::Settings;show(Page::Messages);focus=2;key(input::KeyCode::Select,m);expect(page==Page::Edit&&inputLength==0,"channel key editor starts blank");capture(output,"messages-key-blank",m);textKey('Q',m);const auto invalid=sent.size();key(input::KeyCode::Select,m);expect(sent.size()==invalid&&page==Page::Edit,"invalid hexadecimal key rejected");
+  key(input::KeyCode::Backspace,m);for(unsigned i=0;i<32;++i)textKey('A',m);capture(output,"messages-key-masked",m);expect(!screenHas("AAAA"),"messaging key is masked in rendered commands");key(input::KeyCode::Select,m);expect(sent.back().action==ui::Action::SaveMessagingSetting&&sent.back().field==2&&sent.back().value.size()==32,"masked channel key emitted only on Save");
+  messageState.screen=Screen::Settings;show(Page::Messages);capture(output,"messages-settings",m);focus=4;capture(output,"messages-settings-more",m);key(input::KeyCode::Select,m);textKey('8',m);const auto badHop=sent.size();key(input::KeyCode::Select,m);expect(sent.size()==badHop&&messageState.error[0],"hop8 rejected");key(input::KeyCode::Backspace,m);textKey('3',m);key(input::KeyCode::Select,m);expect(sent.back().field==4&&sent.back().value=="3","hop0..7 accepted");
+  for(Screen screen:{Screen::Mode,Screen::Menu,Screen::Inbox,Screen::Detail,Screen::Contacts,Screen::Contact,Screen::Trust,Screen::Settings,Screen::TxConfirm,Screen::Identity}) {
+    messageState.screen=screen;show(Page::Messages);const unsigned count=std::max(1U,ui::messages::count(messageState,m));
+    for(unsigned i=0;i<count;++i) {focus=i;dirty=true;ui::tick(m);++assertions;}
+  }
+  messageState.screen=Screen::Identity;show(Page::Messages);capture(output,"messages-identity",m);
+  messageState.screen=Screen::Menu;show(Page::Messages);key(input::KeyCode::Back,m);expect(page==Page::Home&&sent.back().action==ui::Action::StopMessages,"leaving message mode explicitly stops radio and returns Home");
+  m.messages.active=false;show(Page::Home);textKey('c',m);focus=1;key(input::KeyCode::Select,m);expect(sent.back().action==ui::Action::StartMessages&&sent.back().field==2,"MeshCore protocol is independently selectable");
+  m.messages.protocol=Protocol::MeshCore;m.messages.active=true;std::strcpy(m.messages.channel,"Public");capture(output,"messages-meshcore",m);
+  messageState.screen=Screen::Menu;m.messages.tx_enabled=false;focus=1;key(input::KeyCode::Select,m);textKey('Q',m);const auto off=sent.size();key(input::KeyCode::Select,m);expect(sent.size()==off&&page==Page::Edit&&messageState.error[0],"TX-off composer cannot emit a send action");key(input::KeyCode::Back,m);
+  messageState.screen=Screen::Menu;key(input::KeyCode::Back,m);m.messages={};m.running=true;textKey('c',m);key(input::KeyCode::Select,m);expect(messageState.screen==Screen::Mode&&sent.back().action==ui::Action::StartMessages,"running capture keeps protocol chooser visible for root's stop/save notice");key(input::KeyCode::Back,m);m.running=false;messageEditor=false;
+}
 }
 int main(int argc,char** argv) {
   expect(argc==2,"output directory supplied");const char* output=argv[1];
@@ -198,10 +245,11 @@ int main(int argc,char** argv) {
   show(Page::Uploads);focus=6;hw::display().commands.clear();dirty=true;ui::tick(model);
   expect(screenHas("Cancel upload")&&screenHas("3/3"),"Cancel remains reachable on third Uploads page");
   key(input::KeyCode::Select,model);expect(sent.back().action==ui::Action::CancelUpload,"third-page cancel action preserved");
+  messagingChecks(output,model);
   // Every page/focus and long valid model string must remain within 240 x 135.
   model.shutting_down=false;memset(model.notice,'N',sizeof(model.notice)-1);memset(model.upload_status,'U',sizeof(model.upload_status)-1);
   for(Page next:{Page::Home,Page::Drive,Page::Recon,Page::Detail,Page::Settings,Page::Credentials,Page::Edit,Page::Regions,Page::Power,Page::Uploads,Page::MeshSettings}) {
-    show(next);const unsigned count=std::max(1U,menuCount());
+    show(next);const unsigned count=std::max(1U,menuCount(model));
     for(unsigned item=0;item<count;++item){focus=item;dirty=true;ui::tick(model);++assertions;}
   }
   for(const char* region:{"US","EU_868","ANZ","JP","UNSET"}) {

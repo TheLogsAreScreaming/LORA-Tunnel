@@ -27,12 +27,13 @@ VERSION_RE = re.compile(r'#define TUNNEL_VERSION "([0-9]+\.[0-9]+\.[0-9]+(?:-bet
 GUIDES = ("USER_GUIDE", "UI_GUIDE", "HARDWARE", "WEB_FLASHER", "RECOVERY",
           "EXPORTS", "RECON", "THIRD_PARTY", "VALIDATION", "LOG_FORMAT",
           "ARCHITECTURE", "TEST_CHECKLIST", "GPS_DIAGNOSTICS", "LORA", "RELINKING", "REGIONS",
-          "COMBINED_MESH", "COMBINED_MESH_VALIDATION", "RELEASE_0_5_0")
+          "COMBINED_MESH", "COMBINED_MESH_VALIDATION", "RELEASE_0_5_0", "MESSAGING")
 
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import package_cardputer as cardputer
+from package_source import validate_public_messaging, validate_messaging_license
 
 HELTEC_FACTORY_SHA = "e6905bfe5521e2f9887a9628dcaf55870b8b44cba2c92c1f8e3c671ee1533a77"
 HELTEC_SOURCE_SHA = "519d91704d2572c8b705912bb17105e1dc348e9e3a7db3141ef2f876e558dd85"
@@ -128,6 +129,8 @@ def read_source(source_zip, version):
             raise ValueError("Source sample credentials must be empty")
         if any(config.get("lora", {}).get(name, []) != [] for name in ("meshtastic_keys", "meshcore_keys")):
             raise ValueError("Source sample mesh keys must be empty")
+        validate_public_messaging(config)
+        validate_messaging_license(sources)
         rules = json.loads(archive.read(prefix + "sdcard/lora-tunnel/detection_rules.json"))
         if rules.get("schema") != 1 or rules.get("rules") != []:
             raise ValueError("Shipped detection rules must be the empty example")

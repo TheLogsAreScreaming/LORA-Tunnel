@@ -18,6 +18,24 @@ BOOLEAN_FIELDS = {"alloc_hook", "alloc_fail", "audio_ok", "tone_active", "alert_
 RADIO_FIELDS = ("mode", "protocol", "frequency_khz", "bandwidth_hz", "sf", "cr", "sync",
                 "remaining_ms", "switches", "deferrals", "timeouts", "interruptions",
                 "mt_listen_ms", "mc_listen_ms", "mt_rx", "mc_rx", "decoded", "other")
+CHAT_FIELDS = ("owner", "active", "tx", "identity_ready", "contacts", "inbox", "pending", "workspace")
+
+
+def parse_chat(line):
+    if not line.startswith("LT CHAT "):
+        return None
+    limits = dict(owner=4, active=1, tx=1, identity_ready=1, contacts=8, inbox=6, pending=1, workspace=65536)
+    values = {}
+    for item in line[8:].split():
+        if "=" not in item:
+            return None
+        key, value = item.split("=", 1)
+        if key not in limits:
+            continue
+        if key in values or not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > limits[key]:
+            return None
+        values[key] = int(value)
+    return values if all(key in values for key in CHAT_FIELDS) else None
 DIAGNOSTICS = (
     ("watchdog", re.compile(r"\b(?:task_wdt:\s*(?:Task watchdog got triggered|Aborting)|Interrupt wdt timeout on CPU[0-9]*)\b", re.IGNORECASE)),
     ("panic", re.compile(r"guru meditation|\bpanic\b", re.IGNORECASE)),
@@ -203,6 +221,12 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
                         emit("LT RADIO " + " ".join(f"{key}={radio[key]}" for key in RADIO_FIELDS))
                     else:
                         omitted += 1
+                elif line.startswith("LT CHAT "):
+                    chat = parse_chat(line)
+                    if chat is not None and latest is not None:
+                        emit("LT CHAT " + " ".join(f"{key}={chat[key]}" for key in CHAT_FIELDS))
+                    else:
+                        omitted += 1
                 else:
                     omitted += 1
         if discarding:
@@ -231,7 +255,7 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True)
-    parser.add_argument("--command", choices=("status", "start", "stop"), default="status")
+    parser.add_argument("--command", choices=("status", "start", "stop", "chat-mt", "chat-mc", "chat-stop", "mesh-mt", "mesh-mc", "mesh-both", "preset LONG_TURBO", "preset LONG_FAST"), default="status")
     parser.add_argument("--seconds", type=int, default=10)
     args = parser.parse_args(argv)
     if not 1 <= args.seconds <= 60:

@@ -3,9 +3,11 @@
 #include "recon_rules.h"
 #include "lora_profiles.h"
 #include "mesh_decode.h"
+#include "messaging_config.h"
 
 namespace tunnel {
 struct Config {
+  messaging::Settings messages;
   // Fresh installations require an explicit region selection before LoRa RX.
   bool lora_enabled = false, lna = false, buzzer = true;
   bool buttons_enabled = true;
@@ -56,6 +58,7 @@ bool saveMeshtasticSlot(uint16_t slot);
 bool saveMeshCoreProfile(const char* name);
 bool saveLoRaDwell(uint32_t milliseconds);
 bool savePublicDecode(bool enabled);
+bool saveMessagingSetting(int field,const char* value);
 const Rule* matchRule(bool ble, const char* address, uint8_t addressType, const char* name);
 RuleApplication applyReconRules(recon::Result& result, bool ble, const char* address,
                                uint8_t addressType, const char* name,

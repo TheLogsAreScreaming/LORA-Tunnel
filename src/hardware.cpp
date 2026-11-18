@@ -254,7 +254,7 @@ void setLoRaFrontend(bool enabled, bool lna) {
   }
   digitalWrite(board::FEM_CTX, lna ? LOW : HIGH);
   digitalWrite(board::FEM_POWER, HIGH);
-  delay(2);
+  delay(5);
   digitalWrite(board::FEM_ENABLE, HIGH);
 }
 

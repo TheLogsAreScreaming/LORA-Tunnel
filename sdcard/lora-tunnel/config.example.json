@@ -20,6 +20,13 @@
     "meshtastic_keys": [],
     "meshcore_keys": []
   },
+  "messaging": {
+    "name": "LORA Tunnel",
+    "meshtastic_channel": "",
+    "meshtastic_key_hex": "",
+    "meshcore_key_hex": "",
+    "hop_limit": 3
+  },
   "schedule": {
     "wifi_dwell_ms": 120,
     "ble_window_ms": 2500

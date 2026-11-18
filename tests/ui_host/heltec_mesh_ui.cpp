@@ -6,6 +6,7 @@
 #include <cstdint>
 std::uint32_t hostMillis=2000;
 #include "../../src/ui.cpp"
+#include "messaging_regression.h"
 
 // Unused startup/evidence dependencies still need symbols on MinGW. These
 // placeholders are never drawn or treated as logo/Recon validation.
@@ -21,7 +22,10 @@ void expect(bool ok,const char* message) {++assertions;if(!ok){std::cerr<<"FAIL:
 std::string quote(const std::string& text) {std::string out="\"";for(char c:text){if(c=='\\'||c=='\"')out+='\\';out+=c;}return out+'\"';}
 void paint(const ui::Model& model) {
   gfx().commands.clear();fullClearNeeded=true;
-  if(page==Page::Settings)settings(model);
+  if(page==Page::Home)home(model);
+  else if(page==Page::Messages)messageScreen(model);
+  else if(page==Page::Keyboard)drawKeyboard();
+  else if(page==Page::Settings)settings(model);
   else if(page==Page::MeshSettings)meshSettings(model);
   else meshChoices(model);
   drawFocus(model);
@@ -35,6 +39,52 @@ void capture(const char* directory,const char* name,const ui::Model& model) {
 bool screenHas(const char* text) {for(const auto& c:gfx().commands)if(c.text.find(text)!=std::string::npos)return true;return false;}
 void tap(int x,int y,const ui::Model& m) {touchAction(uint16_t(x),uint16_t(y),m);paint(m);}
 void press(uint8_t key,const ui::Model& m) {ui::navigation(key,m);paint(m);}
+void messagingChecks(const char* output,ui::Model& m) {
+  ui_message_regression::run(expect);
+  using ui::messages::Screen;using tunnel::messaging::Delivery;using tunnel::mesh::Protocol;
+  m.messages={};m.notice[0]=0;m.running=m.upload_busy=false;
+  std::strcpy(m.profile,"US LongTurbo / 908.750 MHz");std::strcpy(m.messages.channel,"LongTurbo");std::strcpy(m.messages.name,"Example operator");
+  std::strcpy(m.messages.identity,"00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");m.messages.identity_ready=true;
+  setPage(Page::Home);tap(100,260,m);expect(page==Page::Messages&&messageState.screen==Screen::Mode,"Home touch opens Messages separately from capture");capture(output,"messages-protocol",m);
+  const auto before=sent.size();tap(100,105,m);expect(sent.size()==before+1&&sent.back().action==ui::Action::StartMessages&&sent.back().value==1,"protocol touch starts Meshtastic without capture action");
+  m.messages.active=true;capture(output,"messages-menu",m);expect(!ui::allowsBackgroundUpload()&&!ui::allowsUploadJobPolling(),"Messages suppresses upload work");
+  tap(200,252,m);expect(messagePage==1,"message menu next page reachable by touch");capture(output,"messages-menu-more",m);
+  const auto noTx=sent.size();tap(100,105,m);expect(messageState.screen==Screen::TxConfirm&&sent.size()==noTx,"enable TX requires confirmation");capture(output,"messages-enable-tx",m);
+  tap(100,192,m);expect(sent.size()==noTx&&!m.messages.tx_enabled,"TX confirmation cancel sends no action");
+  tap(200,252,m);tap(100,105,m);tap(100,225,m);expect(sent.back().action==ui::Action::ToggleMessageTx&&sent.back().value==1,"explicit TX enable accepted");m.messages.tx_enabled=true;
+  tap(100,139,m);expect(page==Page::Keyboard&&messageEditor&&messageState.target==-1,"channel compose uses existing touchscreen keyboard");
+  tap(16,122,m);tap(40,260,m);tap(16,122,m);tap(120,260,m);tap(40,149,m);tap(165,230,m);
+  expect(std::string(input)=="qQ@ ","touch keyboard supports mixed case, punctuation and space in message");tap(200,260,m);expect(std::string(input)=="qQ@","touch Backspace works");
+  for(unsigned i=0;i<140;++i)append('x');expect(inputSize==120,"touch message limited to120 bytes");capture(output,"messages-compose",m);
+  tap(175,296,m);expect(sent.back().action==ui::Action::SendMessage&&sent.back().value==-1&&sent.back().text.size()==120,"Send queues exactly one channel message");expect(!inputSize&&!messageEditor,"sent draft erased");
+  tunnel::messaging::Record records[6]{};tunnel::messaging::Contact contacts[8]{};
+  for(unsigned i=0;i<6;++i) {auto& r=records[i];r.protocol=Protocol::Meshtastic;r.id=100+i;r.outgoing=i>0;r.direct=i==3;r.delivery=static_cast<Delivery>(i);std::snprintf(r.name,sizeof(r.name),"Example peer %u",i);std::memset(r.text,'a'+i,120);}
+  records[4].delivery=Delivery::Sent;
+  for(unsigned i=0;i<8;++i) {auto& c=contacts[i];c.protocol=Protocol::Meshtastic;c.node=0x12340000+i;std::snprintf(c.name,sizeof(c.name),"Example contact %u",i);for(unsigned j=0;j<32;++j)c.public_key[j]=uint8_t(j+1+i);}
+  m.messages.history=records;m.messages.history_count=255;m.messages.contacts=contacts;m.messages.contact_count=255;
+  expect(ui::messages::count(messageState,m)==6,"inbox count is bounded to actual six slots");capture(output,"messages-inbox",m);tap(200,252,m);capture(output,"messages-inbox-more",m);tap(100,105,m);capture(output,"messages-detail",m);
+  expect(screenHas("Sent (unconfirmed)"),"successful transmission is not called Delivered");records[4].delivery=Delivery::ReceiptUnverified;capture(output,"messages-unverified-receipt",m);expect(screenHas("Receipt (unverified)"),"open detail tracks unverified receipt status");records[4].delivery=Delivery::Delivered;capture(output,"messages-delivered",m);expect(screenHas("Delivered"),"verified receipt updates open detail");tap(100,296,m);tap(100,296,m);tap(100,173,m);capture(output,"messages-contacts",m);tap(200,252,m);capture(output,"messages-contacts-more",m);tap(30,252,m);tap(100,105,m);
+  capture(output,"messages-contact",m);const auto untrusted=sent.size();tap(100,157,m);expect(page==Page::Messages&&sent.size()==untrusted&&messageState.error[0],"untrusted contact cannot compose private text");
+  tap(100,191,m);expect(messageState.screen==Screen::Trust,"trust opens independent fingerprint confirmation");capture(output,"messages-trust",m);tap(100,231,m);
+  expect(sent.back().action==ui::Action::TrustContact&&sent.back().value==0&&sent.back().text.size()==64,"trust action binds displayed full key and slot");
+  contacts[0].trusted=true;capture(output,"messages-contact-trusted",m);tap(100,157,m);expect(page==Page::Keyboard&&messageState.target==0,"trusted private composer selects target");append('Q');const auto cancel=sent.size();tap(50,296,m);expect(sent.size()==cancel&&!inputSize&&page==Page::Messages,"cancel private draft wipes without sending");
+  contacts[0].key_changed=true;capture(output,"messages-key-changed",m);tap(100,157,m);expect(page==Page::Messages&&messageState.error[0],"changed key cannot use previous trust");
+  messageState.screen=Screen::Settings;messagePage=0;setPage(Page::Messages);capture(output,"messages-settings",m);tap(100,173,m);expect(messageEditor&&!inputSize,"key editor blank on entry");capture(output,"messages-key-blank",m);append('Q');const auto invalid=sent.size();tap(175,296,m);expect(page==Page::Keyboard&&sent.size()==invalid,"invalid hex cannot save");
+  tap(200,260,m);for(unsigned i=0;i<32;++i)append('A');capture(output,"messages-key-masked",m);expect(!screenHas("AAAA"),"saved channel secret never shown in pixels");tap(175,296,m);expect(sent.back().action==ui::Action::SaveMessagingSetting&&sent.back().value==2&&sent.back().text.size()==32,"key saves through separate messaging action");
+  tap(200,252,m);capture(output,"messages-settings-more",m);tap(100,105,m);append('8');const auto badHop=sent.size();tap(175,296,m);expect(sent.size()==badHop&&messageState.error[0],"hop limit outside0..7 rejected");tap(200,260,m);append('3');tap(175,296,m);expect(sent.back().value==4&&sent.back().text=="3","valid hop saved");
+  for(Screen screen:{Screen::Mode,Screen::Menu,Screen::Inbox,Screen::Detail,Screen::Contacts,Screen::Contact,Screen::Trust,Screen::Settings,Screen::TxConfirm,Screen::Identity}) {
+    messageState.screen=screen;setPage(Page::Messages);const unsigned count=ui::messages::count(messageState,m),visible=messageVisible();
+    for(unsigned p=0;p<std::max(1U,(count+visible-1)/visible);++p) {
+      messagePage=p;Rect targets[MAX_TARGETS];const auto n=focusTargets(m,targets);
+      for(size_t i=0;i<n;++i) {focusVisible=true;focusIndex=int(i);paint(m);++assertions;}
+    }
+  }
+  messageState.screen=Screen::Identity;messagePage=0;setPage(Page::Messages);capture(output,"messages-identity",m);
+  messageState.screen=Screen::Menu;messagePage=0;setPage(Page::Messages);press(hw::Back,m);expect(page==Page::Home&&sent.back().action==ui::Action::StopMessages,"hardware Back exits Messages by stopping its radio");
+  m.messages.active=false;tap(100,260,m);tap(100,139,m);expect(sent.back().action==ui::Action::StartMessages&&sent.back().value==2,"MeshCore selectable by touch");m.messages.protocol=Protocol::MeshCore;m.messages.active=true;std::strcpy(m.messages.channel,"Public");capture(output,"messages-meshcore",m);
+  messageState.screen=Screen::Menu;m.messages.tx_enabled=false;tap(100,139,m);append('Q');const auto off=sent.size();tap(175,296,m);expect(sent.size()==off&&page==Page::Keyboard&&messageState.error[0],"TX-off keyboard cannot queue transmission");tap(50,296,m);
+  messageState.screen=Screen::Menu;press(hw::Back,m);m.messages={};m.running=true;tap(100,260,m);tap(100,105,m);expect(messageState.screen==Screen::Mode&&sent.back().action==ui::Action::StartMessages,"active capture leaves chooser visible and asks root to report stop/save first");press(hw::Back,m);m.running=false;messageEditor=false;
+}
 }
 int main(int argc,char** argv) {
   expect(argc==2,"output directory supplied");const char* output=argv[1];
@@ -100,6 +150,7 @@ int main(int argc,char** argv) {
       }
     }
   }
-  expect(!hostAllocationCount,"mesh page preview/actions require no new framebuffer allocation");
+  messagingChecks(output,model);
+  expect(!hostAllocationCount,"mesh and messaging pages require no new framebuffer allocation");
   std::cout<<"Heltec mesh UI: "<<assertions<<" checks passed; all draw and button-focus bounds checked. Synthetic previews only.\n";
 }

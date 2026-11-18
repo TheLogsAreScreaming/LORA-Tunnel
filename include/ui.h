@@ -2,9 +2,12 @@
 #include <cstdint>
 #include <cstddef>
 #include "keyboard_input.h"
+#include "messaging_ui.h"
 
 namespace ui {
 struct Model {
+  tunnel::messaging::View messages{};
+  bool messages_transitioning=false;
   bool running = false, recon = false, sd = false, gps = false, lora_ready = false;
   uint32_t wifi = 0, ble = 0, lora = 0, drops = 0, errors = 0, nmea_chars = 0;
   bool buttons_enabled = true, recon_alerts = true;
@@ -30,7 +33,13 @@ struct Model {
   char upload_status[64]{};
 };
 enum class Action { ToggleSession, ToggleMode, SaveCredential, RetryStorage, ToggleAlerts, SaveRegion, Shutdown, ToggleAutoUpload, UploadNow, CancelUpload, SaveLoRaMode,
-  SaveMeshtasticPreset, SaveMeshtasticSlot, SaveMeshCoreProfile, SaveLoRaDwell, SavePublicDecode };
+  SaveMeshtasticPreset, SaveMeshtasticSlot, SaveMeshCoreProfile, SaveLoRaDwell, SavePublicDecode,
+  StartMessages, StopMessages, ToggleMessageTx, SendMessage, AnnounceIdentity,
+  TrustContact, ForgetContact, SaveMessagingSetting };
+// Messaging fields: StartMessages=1 Meshtastic/2 MeshCore; ToggleMessageTx=0/1;
+// SendMessage=-1 channel or 0..7 contact, at most 120 text bytes. Trust/Forget
+// include the displayed 64-hex public key so the handler can reject a stale slot.
+// SaveMessagingSetting=0 name/1 MT channel/2 MT key/3 MC key/4 MT hops.
 // Handler executes synchronously, sometimes while UI owns SPI. Copy text to a
 // bounded action queue immediately; do not access SD, radio, or draw here.
 using Handler = void (*)(Action, int, const char*);

@@ -1,4 +1,7 @@
 #include "scanners.h"
+#include "messaging.h"
+#include "messaging_airtime.h"
+#include "utc_seconds.h"
 #include "app_types.h"
 #include "board_config.h"
 #include "hardware.h"
@@ -172,6 +175,21 @@ lora_scan::Dwell radioDwell;
 uint8_t radioSlot=0;
 bool radioListening=false, hopDeferred=false;
 uint32_t radioListenAt=0, maximumPacketMs=60000;
+enum class ChatPhase { Off, Receive, Cad, Transmit };
+ChatPhase chatPhase=ChatPhase::Off;
+const uint8_t* chatFrame=nullptr;
+size_t chatFrameLength=0;
+uint32_t chatDeadline=0,chatRetryAt=0,chatRequestedAt=0,chatNextTxAt=0;
+uint32_t chatAirtimeMs=0;
+uint32_t chatBudgetAt=0,chatBudgetDuration=0;
+bool chatBudgetArmed=false;
+#if !defined(LORA_TUNNEL_CARDPUTER_ADV)
+// Persistent table: GPIO5=CTX, GPIO2=CSD; SX1262 DIO2 controls CPS.
+Module::RfSwitchMode_t frontendModes[]={
+  {Module::MODE_IDLE,{HIGH,LOW}}, {Module::MODE_RX,{HIGH,HIGH}},
+  {Module::MODE_TX,{HIGH,HIGH}}, END_OF_MODE_TABLE
+};
+#endif
 enum class RadioTransition { None, Receive, Standby };
 RadioTransition radioPending=RadioTransition::None;
 // All radio operations run from the main task. The IRQ only sets a flag.
@@ -260,6 +278,13 @@ bool applyRadioProfile(const lora_scan::Snapshot& profile,bool initialize) {
   const uint64_t estimate=(uint64_t(radio.getTimeOnAir(255))+999)/1000*2+2000;
   maximumPacketMs=static_cast<uint32_t>(std::min(uint64_t(60000),estimate));
   return true;
+}
+void installTransmitSwitching() {
+#if !defined(LORA_TUNNEL_CARDPUTER_ADV)
+  const uint32_t pins[]={board::FEM_CTX,board::FEM_ENABLE,RADIOLIB_NC,RADIOLIB_NC,RADIOLIB_NC};
+  frontendModes[1].values[0]=config.lna?LOW:HIGH;
+  radio.setRfSwitchTable(pins,frontendModes);
+#endif
 }
 void serviceRadioTransition() {
   if(radioPending==RadioTransition::None) return;
@@ -584,6 +609,90 @@ void serviceRadioHop() {
   ++radioStatus.switches;hopDeferred=false;
   radioDwell.reset(millis(),config.lora_dwell_ms);
 }
+bool restoreChatReceiveLocked() {
+  radioIRQ=false;stopRadioListen();
+  bool ok=radio.standby()==RADIOLIB_ERR_NONE;
+  if(ok){hw::setLoRaFrontend(true,config.lna);ok=hw::loraFrontendPresent()&&armRadioReceive()==RADIOLIB_ERR_NONE;}
+  chatPhase=ChatPhase::Receive;
+  if(!ok){radioOK=false;++counters.radio_errors;hw::setLoRaFrontend(false);}
+  return ok;
+}
+void serviceMessages() {
+  if(chatPhase==ChatPhase::Off)return;
+  uint8_t received[255];size_t receivedLength=0;
+  bool completed=false,success=false,failed=false;
+  const uint32_t now=millis();
+  if(chatBudgetArmed&&uint32_t(now-chatBudgetAt)>=chatBudgetDuration)chatBudgetArmed=false;
+  {
+    RadioBusLock lock(0);if(!lock.held)return;
+    if(!radioOK)return;
+    if(chatFrame&&!messaging::transmitAllowed()){
+      if(chatPhase==ChatPhase::Transmit)radio.finishTransmit();
+      chatFrame=nullptr;chatFrameLength=0;completed=true;
+      if(!restoreChatReceiveLocked())failed=true;
+    }else if(chatPhase==ChatPhase::Transmit){
+      const auto irq=radio.getIrqFlags();
+      if((irq&RADIOLIB_SX126X_IRQ_TX_DONE)||int32_t(now-chatDeadline)>=0){
+        const int finish=radio.finishTransmit();
+        completed=true;success=(irq&RADIOLIB_SX126X_IRQ_TX_DONE)&&finish==RADIOLIB_ERR_NONE;
+        chatFrame=nullptr;chatFrameLength=0;
+        if(!restoreChatReceiveLocked())failed=true;
+      }
+    }else if(chatPhase==ChatPhase::Cad){
+      const auto irq=radio.getIrqFlags();
+      if((irq&RADIOLIB_SX126X_IRQ_CAD_DONE)||int32_t(now-chatDeadline)>=0){
+        const bool clear=(irq&RADIOLIB_SX126X_IRQ_CAD_DONE)&&radio.getChannelScanResult()==RADIOLIB_CHANNEL_FREE;
+        radioIRQ=false;
+        if(clear&&chatFrame){
+          chatAirtimeMs=uint32_t((uint64_t(radio.getTimeOnAir(chatFrameLength))+999)/1000);
+          // Raw SX1262 drive; the external Heltec PA is not calibrated here.
+          const bool power=chatAirtimeMs&&messaging::dutyPercent(config.region)&&radio.setOutputPower(0)==RADIOLIB_ERR_NONE;
+          if(power&&radio.startTransmit(chatFrame,chatFrameLength)==RADIOLIB_ERR_NONE){
+            chatPhase=ChatPhase::Transmit;chatDeadline=now+std::min(uint32_t(180000),chatAirtimeMs*2+5000);
+            chatNextTxAt=now+messaging::airtimeSpacing(chatAirtimeMs,messaging::dutyPercent(config.region));
+            chatBudgetAt=now;chatBudgetDuration=messaging::airtimeSpacing(chatAirtimeMs,messaging::dutyPercent(config.region));
+            chatBudgetArmed=true;
+          }else{completed=true;chatFrame=nullptr;chatFrameLength=0;if(!restoreChatReceiveLocked())failed=true;}
+        }else{
+          chatRetryAt=now+250+esp_random()%1250;
+          if(!restoreChatReceiveLocked())failed=true;
+        }
+      }
+    }else{
+      const auto irq=radio.getIrqFlags();
+      if(radioIRQ.exchange(false)||(irq&RADIOLIB_SX126X_IRQ_RX_DONE)){
+        const size_t size=radio.getPacketLength();
+        if(size&&size<=sizeof(received)&&radio.readData(received,size)==RADIOLIB_ERR_NONE){receivedLength=size;++radioStatus.received[radioSlot];}
+        else ++counters.radio_errors;
+        if(!restoreChatReceiveLocked())failed=true;
+      }else if(chatFrame&&uint32_t(now-chatRequestedAt)>20000){
+        completed=true;chatFrame=nullptr;chatFrameLength=0;
+      }else if(!(irq&(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED|RADIOLIB_SX126X_IRQ_HEADER_VALID))&&
+               int32_t(now-chatRetryAt)>=0&&!chatBudgetArmed){
+        if(!chatFrame&&messaging::nextFrame(now,chatFrame,chatFrameLength))chatRequestedAt=now;
+        if(chatFrame){
+          stopRadioListen();radioIRQ=false;
+          const int standby=radio.standby();
+          const auto finalIrq=standby==RADIOLIB_ERR_NONE?radio.getIrqFlags():0;
+          if(finalIrq&RADIOLIB_SX126X_IRQ_RX_DONE){
+            const size_t size=radio.getPacketLength();
+            if(size&&size<=sizeof(received)&&radio.readData(received,size)==RADIOLIB_ERR_NONE){receivedLength=size;++radioStatus.received[radioSlot];}
+            else ++counters.radio_errors;
+            chatRetryAt=now+250;if(!restoreChatReceiveLocked())failed=true;
+          }else if(finalIrq&(RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED|RADIOLIB_SX126X_IRQ_HEADER_VALID)){
+            chatRetryAt=now+500;if(!restoreChatReceiveLocked())failed=true;
+          }else if(standby==RADIOLIB_ERR_NONE&&messaging::dutyPercent(config.region)&&radio.startChannelScan()==RADIOLIB_ERR_NONE){chatPhase=ChatPhase::Cad;chatDeadline=now+3000;}
+          else{completed=true;chatFrame=nullptr;chatFrameLength=0;if(!restoreChatReceiveLocked())failed=true;}
+        }
+      }
+    }
+  }
+  // Private plaintext never enters CaptureObservation or an SD upload session.
+  if(completed)messaging::transmitted(success,now);
+  if(failed)messaging::radioFailure("Radio failed; stop Messages and retry");
+  if(receivedLength){const auto clock=currentFix();messaging::receive(received,receivedLength,now,clock.utc_age_ms<=1500?utcSeconds(clock.utc):0);}
+  messaging::tick(now);
+}
 }
 
 Fix currentFix() {
@@ -806,7 +915,7 @@ bool scannersRestoreBleAfterUpload() {
 #endif
 }
 bool scannersConfigureLoRa() {
-  if(capturing.load() || quietLatched.load()) return false;
+  if(capturing.load() || quietLatched.load() || chatPhase!=ChatPhase::Off) return false;
   stopRadioListen();
   radioStatus=lora_scan::Status{};hopDeferred=false;
   const auto* meshCore=lora_scan::meshCoreProfile(config.region,config.meshcore_profile);
@@ -843,13 +952,14 @@ bool scannersConfigureLoRa() {
   }
   radioInitAttempted=true;
   if(!applyRadioProfile(radioProfiles[radioSlot],true)) { ++counters.radio_errors; return false; }
+  installTransmitSwitching();
   radioInitialized=true;
   radio.setDio1Action(onRadio);
   radioOK=true;
   return true;
 }
 void scannersStart() {
-  if(quietLatched.load(std::memory_order_relaxed) || !bleScanner || !scannersCaptureReady()) return;
+  if(chatPhase!=ChatPhase::Off || quietLatched.load(std::memory_order_relaxed) || !bleScanner || !scannersCaptureReady()) return;
   const bool wardriver=captureMode.load(std::memory_order_relaxed)==CaptureMode::Wardriver;
   radioStatus.listen_ms[0]=radioStatus.listen_ms[1]=0;
   radioStatus.received[0]=radioStatus.received[1]=0;
@@ -876,6 +986,7 @@ void scannersStop() {
   serviceRadioTransition();
 }
 bool scannersEnterQuiet() {
+  if(chatPhase!=ChatPhase::Off)return false;
   // The capture gate also prevents a future session from reviving callbacks
   // after a partial shutdown. Normal startup is possible only after reboot.
   portENTER_CRITICAL(&captureMux);
@@ -922,6 +1033,10 @@ bool scannersEnterQuiet() {
 }
 void scannersTick() {
   accountRadioListen();
+  // Runs even outside Messages, so a paid airtime debt cannot become armed
+  // again after millis wraps during a long passive capture or idle period.
+  if(chatBudgetArmed&&uint32_t(millis()-chatBudgetAt)>=chatBudgetDuration)chatBudgetArmed=false;
+  if(chatPhase!=ChatPhase::Off){serviceMessages();return;}
   serviceRadioTransition();
   if(quietLatched.load(std::memory_order_relaxed) || !capturing.load()) return;
   if(captureMode.load(std::memory_order_relaxed)==CaptureMode::Wardriver) {
@@ -954,8 +1069,52 @@ void scannersTick() {
   }
 }
 const char* scanPhase() {
+  if(chatPhase!=ChatPhase::Off)return "Messages";
   if(quietLatched.load(std::memory_order_relaxed)) return "Quiet until reboot";
   switch(phase) { case Phase::Wifi:return "Wi-Fi passive"; case Phase::WifiResults:return "Wi-Fi results"; case Phase::ReconWifi:return "Recon Wi-Fi frames"; case Phase::Ble:return "BLE passive"; case Phase::Guard:return "Radio guard"; default:return "Ready"; }
+}
+bool scannersMessagesBegin(mesh::Protocol protocol) {
+  if(capturing.load()||quietLatched.load()||chatPhase!=ChatPhase::Off||!radioInitialized||!radioOK||!config.lora_enabled||!messaging::active())return false;
+  const unsigned slot=protocol==mesh::Protocol::Meshtastic?0:protocol==mesh::Protocol::MeshCore?1:2;
+  if(slot>1||!radioProfiles[slot].frequency_mhz)return false;
+  RadioBusLock lock;if(!lock.held)return false;
+  stopRadioListen();radioPending=RadioTransition::None;radioIRQ=false;
+  auto target=radioProfiles[slot];
+  // A custom primary channel changes Meshtastic's AUTO frequency. Explicit
+  // slots and custom raw PHY settings remain literal. This temporary tuning
+  // never replaces the saved passive wardriving profile.
+  if(slot==0&&config.messages.meshtastic_channel[0]&&!config.meshtastic_slot){
+    const auto* region=lora_profiles::find(config.region);
+    const auto* modem=lora_profiles::findModemPreset(config.meshtastic_preset);
+    if(region&&modem){
+      const auto slots=lora_profiles::slotCount(*region,*modem);lora_profiles::Profile selected;
+      if(!slots||!lora_profiles::makeProfile(config.region,config.meshtastic_preset,
+          uint16_t(1+lora_profiles::channelNameHash(config.messages.meshtastic_channel)%slots),selected))return false;
+      target.frequency_mhz=float(selected.frequency_mhz);
+    }
+  }
+  if(!applyRadioProfile(target,false)){radioOK=false;hw::setLoRaFrontend(false);return false;}
+  installTransmitSwitching();radioSlot=slot;radioStatus.active=target;radioStatus.combined=false;
+  hw::setLoRaFrontend(true,config.lna);
+  if(!hw::loraFrontendPresent()||armRadioReceive()!=RADIOLIB_ERR_NONE){radioOK=false;hw::setLoRaFrontend(false);return false;}
+  chatPhase=ChatPhase::Receive;chatFrame=nullptr;chatFrameLength=0;chatRetryAt=millis();return true;
+}
+bool scannersMessagesCancelTx() {
+  if(chatPhase==ChatPhase::Off)return true;
+  RadioBusLock lock;if(!lock.held)return false;
+  if(chatPhase==ChatPhase::Transmit)radio.finishTransmit();
+  chatFrame=nullptr;chatFrameLength=0;
+  return restoreChatReceiveLocked();
+}
+bool scannersMessagesEnd() {
+  if(chatPhase==ChatPhase::Off)return true;
+  {
+    RadioBusLock lock;if(!lock.held)return false;
+    if(chatPhase==ChatPhase::Transmit)radio.finishTransmit();
+    if(radio.standby()!=RADIOLIB_ERR_NONE)return false;
+    stopRadioListen();radioIRQ=false;chatFrame=nullptr;chatFrameLength=0;chatPhase=ChatPhase::Off;hw::setLoRaFrontend(false);
+  }
+  return scannersConfigureLoRa();
 }
 bool loraReady() { return radioOK && hw::loraFrontendPresent(); }
 lora_scan::Status loraScanStatus() {

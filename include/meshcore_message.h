@@ -26,6 +26,9 @@ struct Message {
   Kind kind=Kind::None;
   std::uint32_t timestamp=0;
   std::uint8_t attempt=0, sender[32]{}, recipient[32]{}, ack[4]{};
+  // Validated group's canonical packet digest, not an authenticated sender ID.
+  // First 8 SHA-256 bytes over payload type + payload, excluding mutable paths.
+  std::uint8_t group_fingerprint[8]{};
   std::uint8_t path[MaxPath]{}, path_encoding=0;
   bool flood=false;
   ReceiptTrust receipt_trust=ReceiptTrust::None;

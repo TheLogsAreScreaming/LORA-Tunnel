@@ -1,6 +1,6 @@
 # Meshtastic and MeshCore messaging candidate
 
-This describes the local **0.6.0-dev.chat2 candidate** for Heltec V4-R8 / Expansion V2 and Cardputer ADV + U214. The new two-way messaging paths have **not passed physical peer-radio testing**. Host tests and synthetic screen previews demonstrate software behavior; they do not establish on-air interoperability, RF output power, battery behavior, or delivery reliability. The published 0.5.0 downloads and manifests remain unchanged by this work.
+This describes the local **0.6.0-dev.chat3 candidate** for Heltec V4-R8 / Expansion V2 and Cardputer ADV + U214. The new two-way messaging paths have **not passed physical peer-radio testing**. Host tests and synthetic screen previews demonstrate software behavior; they do not establish on-air interoperability, RF output power, battery behavior, or delivery reliability. The published 0.5.0 downloads and manifests remain unchanged by this work.
 
 Messages is a separate operating mode. Stop Wardriver or Recon, wait for its session to finish saving, then open **Home → Messages** and select **Meshtastic** or **MeshCore**. On Cardputer, **C** on Home opens Messages. The one SX1262 radio listens to one protocol/profile at a time. Combined wardriving remains a receive-only alternating scan mode; it does not provide simultaneous messaging or simultaneous reception of both networks. Wi-Fi/BLE wardriving is stopped while Messages owns the radio.
 
@@ -39,6 +39,8 @@ TX permission is runtime-only and starts **OFF** for each messaging session and 
 The candidate keeps up to **eight contacts shared between both protocols**. An observed name or announcement does not establish who controls a device. Open a contact, compare its entire 32-byte public key with its owner through a trusted route, and explicitly confirm **Review / trust public key**. A changed key is shown as changed and blocks private composition until reviewed again. Trust/forget actions bind the displayed key as well as the slot, so a changed contact cannot silently reuse a queued decision. Select the contact's protocol before composing privately.
 
 Local Meshtastic/MeshCore identity material and contact/trust records use the application's **`lt-chat` NVS namespace**. They survive normal restarts and application changes that preserve NVS. They are private device data, not release artifacts; never publish a full-flash device backup as an installation image. Other applications' NVS namespaces are not used for messaging storage.
+
+MeshCore group duplicates use the complete validated packet content in a 16-entry RAM cache. Different messages from radios sharing a display name or timestamp remain distinct. Repeater copies and echoes of successful local group transmissions are suppressed while their cache entries remain. This is bounded duplicate filtering, not authenticated or persistent replay protection.
 
 The inbox is a bounded **six-record RAM history**, not a permanent message archive. Leaving Messages wipes its history and pending message state. A pending private message can occupy the single outgoing slot until receipt, timeout or cancellation; the candidate makes at most three attempts. The status text distinguishes:
 

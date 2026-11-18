@@ -12,6 +12,7 @@ namespace mt=meshtastic;
 namespace mc=meshcore_message;
 constexpr std::uint32_t IdentityMagic=0x4c544d31,ContactsMagic=0x4c544331;
 constexpr std::uint32_t IdBlock=256,ReceiptWait=120000,UserInterval=5000;
+constexpr std::uint8_t MeshCoreGroupReplay=0x80|std::uint8_t(mesh::Protocol::MeshCore);
 struct IdentityStore {
   std::uint32_t magic=IdentityMagic,node=0,next_id=0,last_time=0;
   std::uint8_t mt_secret[32]{},mc_seed[32]{};
@@ -134,16 +135,26 @@ Record& addRecord(const Record& value) {
 void delivery(std::uint32_t id,Delivery result) {
   for(auto& record:state->history)if(record.outgoing&&record.id==id&&record.protocol==state->protocol){record.delivery=result;break;}
 }
-bool duplicate(Replay* entries,std::uint32_t peer,std::uint32_t id,mesh::Protocol protocol) {
-  for(unsigned i=0;i<16;++i)if(entries[i].peer==peer&&entries[i].id==id&&entries[i].protocol==std::uint8_t(protocol))return true;
+bool duplicate(Replay* entries,std::uint32_t peer,std::uint32_t id,std::uint8_t domain) {
+  for(unsigned i=0;i<16;++i)if(entries[i].peer==peer&&entries[i].id==id&&entries[i].protocol==domain)return true;
   return false;
 }
 bool remember(std::uint32_t peer,std::uint32_t id,bool direct) {
   auto& s=*state;
-  if(duplicate(s.replay,peer,id,s.protocol)||(direct&&duplicate(s.peers.private_replay,peer,id,s.protocol)))return false;
+  const auto domain=std::uint8_t(s.protocol);
+  if(duplicate(s.replay,peer,id,domain)||(direct&&duplicate(s.peers.private_replay,peer,id,domain)))return false;
   s.replay[s.replay_next++%16]={peer,id,std::uint8_t(s.protocol)};
   if(direct){s.peers.private_replay[s.peers.replay_next++%16]={peer,id,std::uint8_t(s.protocol)};if(!saveContacts())return false;}
   return true;
+}
+bool rememberGroup(const std::uint8_t fingerprint[8]) {
+  // Group names/timestamps are not sender identities. Reuse the bounded RAM
+  // ring for canonical packet digests under a domain distinct from private RX.
+  std::uint32_t first=0,second=0;
+  for(unsigned i=0;i<4;++i){first|=std::uint32_t(fingerprint[i])<<(8*i);second|=std::uint32_t(fingerprint[i+4])<<(8*i);}
+  auto& s=*state;
+  if(duplicate(s.replay,first,second,MeshCoreGroupReplay))return false;
+  s.replay[s.replay_next++%16]={first,second,MeshCoreGroupReplay};return true;
 }
 int findContact(mesh::Protocol protocol,std::uint32_t node,const std::uint8_t* key=nullptr) {
   for(unsigned i=0;i<state->peers.count;++i){const auto& p=state->peers.contacts[i];
@@ -319,7 +330,15 @@ void transmitted(bool success,std::uint32_t now) {
   auto& p=s.pending;if(!p.used||!p.inflight)return;p.inflight=false;++p.attempts;
   if(success)++metrics.tx_ok;else ++metrics.tx_fail;
   if(!success){clearPending(Delivery::Failed);status("Transmit failed; reception restored");return;}
-  if(!p.direct){clearPending(Delivery::Sent);status("Sent; delivery unconfirmed");return;}
+  if(!p.direct){
+    if(s.protocol==mesh::Protocol::MeshCore){
+      mc::Message group;
+      // Announcements also use this branch; only a validated group frame can
+      // seed echo suppression, and only after a successful local transmission.
+      if(mc::parseGroup(p.frame.bytes,p.frame.length,mcKey(),mcKeyLength(),mc::platformCrypto(),group))rememberGroup(group.group_fingerprint);
+    }
+    clearPending(Delivery::Sent);status("Sent; delivery unconfirmed");return;
+  }
   p.deadline=now+ReceiptWait;delivery(p.id,Delivery::AwaitingAck);status("Sent; waiting for recipient receipt");
 }
 void tick(std::uint32_t now) {
@@ -399,7 +418,7 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
     if(unixTime<1704067200U){status("Private message needs a fresh GPS UTC time");return;}
     if(message.timestamp<1704067200U)return;
     const auto peerHash=hash(peer.public_key,32);
-    const bool seen=duplicate(s.peers.private_replay,peerHash,message.timestamp,s.protocol);
+    const bool seen=duplicate(s.peers.private_replay,peerHash,message.timestamp,std::uint8_t(s.protocol));
     if(message.timestamp<=s.peers.last_time[i]&&!seen)return;
     if(message.timestamp>unixTime+3600)return;
     if(s.tx&&!s.response.length&&!s.ack_inflight){mc::Frame response;if(mc::reply(s.mc_identity,contact,message,mc::platformCrypto(),response)){frameCopy(s.response,response);s.ack_ready_at=now+250+s.storage.random()%500;}}
@@ -410,8 +429,7 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
   }
   mc::Message group;
   if(mc::parseGroup(frame,length,mcKey(),mcKeyLength(),mc::platformCrypto(),group)){
-    if(!std::strcmp(group.name,s.settings.name)&&group.timestamp<=s.identity.last_time)return;
-    if(!remember(hash(group.name,std::strlen(group.name)),group.timestamp,false))return;
+    if(!rememberGroup(group.group_fingerprint))return;
     Record record;record.protocol=s.protocol;record.id=group.timestamp;copy(record.name,sizeof(record.name),group.name);copy(record.text,sizeof(record.text),group.text);addRecord(record);++metrics.rx_text;status("Channel message received (claimed sender)");
   }
 }

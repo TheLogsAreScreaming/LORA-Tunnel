@@ -24,8 +24,51 @@ static Frame encryptedPeer(const Identity& sender,const Identity& recipient,std:
   CHECK(c.ecb(true,secret,plaintext,n,f.bytes+6));CHECK(c.hmac(secret,f.bytes+6,n,hash));
   std::memcpy(f.bytes+4,hash,2);f.length=n+6;return f;
 }
+static void groupFingerprintChecks(const Crypto& crypto){
+  Message m;Frame original;
+  CHECK(groupText(publicGroupKey(),16,"Alice","hello mesh",0x66554433,0,crypto,original));
+  CHECK(parseGroup(original.bytes,original.length,publicGroupKey(),16,crypto,m));
+  CHECK(std::memcmp(m.group_fingerprint,vectors::group16_fingerprint,8)==0);
+  // Repeaters may add route bytes, change route mode and insert transport codes.
+  // The canonical payload digest must remain identical for all such copies.
+  for(unsigned route=0;route<4;++route){
+    Frame routed;routed.bytes[0]=(5<<2)|route;std::size_t position=1;
+    if(route==0||route==3){for(unsigned i=0;i<4;++i)routed.bytes[position++]=std::uint8_t(0x10+i);}
+    routed.bytes[position++]=0x42; // two two-byte hashes
+    for(unsigned i=0;i<4;++i)routed.bytes[position++]=std::uint8_t(0xa0+i);
+    std::memcpy(routed.bytes+position,original.bytes+2,original.length-2);routed.length=position+original.length-2;
+    CHECK(parseGroup(routed.bytes,routed.length,publicGroupKey(),16,crypto,m));
+    CHECK(std::memcmp(m.group_fingerprint,vectors::group16_fingerprint,8)==0);
+  }
+  Frame different;CHECK(groupText(publicGroupKey(),16,"Alice","different text",0x66554433,0,crypto,different));
+  CHECK(parseGroup(different.bytes,different.length,publicGroupKey(),16,crypto,m));CHECK(std::memcmp(m.group_fingerprint,vectors::group16_fingerprint,8)!=0);
+  CHECK(groupText(publicGroupKey(),16,"Alice","hello mesh",0x66554433,1,crypto,different));
+  CHECK(parseGroup(different.bytes,different.length,publicGroupKey(),16,crypto,m));CHECK(std::memcmp(m.group_fingerprint,vectors::group16_fingerprint,8)!=0);
+  CHECK(parseGroup(vectors::group32,sizeof(vectors::group32),vectors::key32,32,crypto,m));
+  CHECK(std::memcmp(m.group_fingerprint,vectors::group32_fingerprint,8)==0);
+  CHECK(std::memcmp(m.group_fingerprint,vectors::group16_fingerprint,8)!=0);
+  Frame malformed=original;malformed.bytes[1]=0xc0;
+  CHECK(!parseGroup(malformed.bytes,malformed.length,publicGroupKey(),16,crypto,m));
+  for(auto value:m.group_fingerprint)CHECK(value==0);
+  malformed=original;malformed.bytes[1]=0xbf;
+  CHECK(!parseGroup(malformed.bytes,malformed.length,publicGroupKey(),16,crypto,m));
+  for(std::size_t n=0;n<original.length;++n){
+    CHECK(!parseGroup(original.bytes,n,publicGroupKey(),16,crypto,m));
+    const std::uint8_t zero[8]{};CHECK(!std::memcmp(m.group_fingerprint,zero,8));
+  }
+  malformed=original;malformed.bytes[malformed.length-1]^=1;
+  CHECK(!parseGroup(malformed.bytes,malformed.length,publicGroupKey(),16,crypto,m));
+  for(auto value:m.group_fingerprint)CHECK(value==0);
+  Crypto fails=crypto;fails.sha256=[](const std::uint8_t*,std::size_t n,std::uint8_t out[32])->bool{
+    // Let channel-key hashing succeed; fail the later canonical packet hash.
+    if(n!=16)return false;return platformCrypto().sha256(publicGroupKey(),16,out);
+  };
+  CHECK(!parseGroup(original.bytes,original.length,publicGroupKey(),16,fails,m));
+  CHECK(m.kind==Kind::None);for(auto value:m.group_fingerprint)CHECK(value==0);
+}
 int main(){
   const Crypto& crypto=platformCrypto();Identity alice,bob,collision;
+  groupFingerprintChecks(crypto);
   CHECK(identity(vectors::seed_a,crypto,alice));CHECK(identity(vectors::seed_b,crypto,bob));CHECK(identity(vectors::seed_collision,crypto,collision));
   CHECK(std::memcmp(alice.public_key,vectors::pub_a,32)==0);CHECK(std::memcmp(bob.public_key,vectors::pub_b,32)==0);
   Identity aliased;std::memcpy(aliased.seed,vectors::seed_a,32);CHECK(identity(aliased.seed,crypto,aliased));CHECK(std::memcmp(aliased.public_key,alice.public_key,32)==0);

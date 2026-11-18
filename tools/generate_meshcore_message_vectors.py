@@ -74,13 +74,14 @@ def main():
     for label, key in [('group16', group16), ('group32', group32)]:
         secret_key = key.ljust(32, b'\0')
         values[label] = b'\x15\0' + hashlib.sha256(key).digest()[:1] + seal(secret_key, stamp + b'\0' + name + b': ' + text)
+        values[label + '_fingerprint'] = hashlib.sha256(b'\x05' + values[label][2:]).digest()[:8]
     generated = ['// Synthetic independent vectors. Reproduce with tools/generate_meshcore_message_vectors.py.', '#pragma once', '#include <cstdint>', 'namespace vectors {']
     for label, data in values.items():
         generated.append('static const std::uint8_t ' + label + '[]={' + ','.join(f'0x{x:02x}' for x in data) + '};')
     generated.append('}')
     target = ROOT / 'tests/meshcore_message_host/vectors.h'
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text('\n'.join(generated) + '\n', encoding='utf8')
+    target.write_bytes(('\n'.join(generated) + '\n').encode('utf8'))
     print(f'Wrote {len(values)} independent synthetic vectors')
 
 

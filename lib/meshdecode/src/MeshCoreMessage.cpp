@@ -94,6 +94,12 @@ bool parseGroup(const std::uint8_t* f,std::size_t len,const std::uint8_t* key,st
   if(!split || split>MaxName || split+2>=tn || tn-split-2>MaxText)return false;
   Message m;m.kind=Kind::GroupText;m.timestamp=read32(s.plain);m.attempt=s.plain[4]&3;
   copyUtf8Bounded(m.name,sizeof(m.name),s.plain+5,split);copyUtf8Bounded(m.text,sizeof(m.text),s.plain+7+split,tn-split-2);
+  // Match upstream Packet::calculatePacketHash: routing/transport/path fields
+  // change at relays and must not turn one message into multiple inbox records.
+  // Only expose a digest after the envelope, MAC and plaintext all validate.
+  std::uint8_t canonical[185]{};canonical[0]=e.type;std::memcpy(canonical+1,e.payload,e.size);
+  if(!c.sha256(canonical,e.size+1,s.hash))return false;
+  std::memcpy(m.group_fingerprint,s.hash,sizeof(m.group_fingerprint));
   pathInfo(e,m);out=m;return true;
 }
 bool advert(const Identity& self,const char* name,std::uint32_t stamp,const Crypto& c,Frame& out) {

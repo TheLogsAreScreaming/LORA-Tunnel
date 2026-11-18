@@ -51,7 +51,7 @@ int main() {
     Wire.report(points,0,100,150);
     expect(hw::readTouch(x,y)==TouchState::Unavailable,"invalid point count does not imply release");
   }
-  for(unsigned points=0;points<3;++points) {
+  for(unsigned points=1;points<3;++points) {
     Wire.report(points,3,100,150);
     expect(hw::readTouch(x,y)==TouchState::Unavailable,"reserved event does not imply release");
   }
@@ -60,8 +60,14 @@ int main() {
   Wire.report(1,2,100,320);
   expect(hw::readTouch(x,y)==TouchState::Unavailable,"out-of-bounds y is unavailable");
   expect(x==42&&y==43,"invalid coordinates are never published");
+  for(unsigned event=0;event<4;++event) {
+    Wire.report(0,event,4095,4095);
+    expect(hw::readTouch(x,y)==TouchState::Released,"zero-point report releases regardless of stale point event or coordinates");
+  }
   Wire.report(0,0);
-  expect(hw::readTouch(x,y)==TouchState::Released,"valid no-points report is release");
+  for(unsigned i=3;i<7;++i)Wire.bytes[i]=0xff;
+  expect(hw::readTouch(x,y)==TouchState::Released,"zero-point report ignores all-FF nonexistent point record");
+  expect(x==42&&y==43,"zero-point report never publishes stale coordinates");
   Wire.report(1,1,4095,4095);
   expect(hw::readTouch(x,y)==TouchState::Released,"valid up report is release without requiring meaningful coordinates");
   Wire.report(1,0,100,150);

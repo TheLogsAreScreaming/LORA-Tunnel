@@ -12,7 +12,7 @@ class HeltecTouchTests(unittest.TestCase):
         try:
             from check_heltec_touch import check
             result = check()
-            self.assertIn("Heltec: 24 actual touch-driver checks passed", result)
+            self.assertIn("Heltec: 28 actual touch-driver checks passed", result)
             self.assertIn("Cardputer: 3 actual touch-driver checks passed", result)
         finally:
             sys.path.pop(0)

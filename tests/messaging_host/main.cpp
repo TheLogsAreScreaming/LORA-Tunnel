@@ -220,8 +220,87 @@ static void diagnosticEvidenceSurvivesExit(){
   CHECK(chat::diagnostics().send_requests==after.send_requests);CHECK(chat::diagnostics().rx_text==after.rx_text);
   CHECK(chat::diagnostics().tx_fail==after.tx_fail);chat::end();
 }
+static mc::Frame groupRoute(const std::uint8_t* bytes,std::size_t length){
+  mc::Frame routed;routed.bytes[0]=(5<<2)|0; // flood with mutable transport codes
+  routed.bytes[1]=0x12;routed.bytes[2]=0x34;routed.bytes[3]=0x56;routed.bytes[4]=0x78;
+  routed.bytes[5]=3;routed.bytes[6]=0xaa;routed.bytes[7]=0xbb;routed.bytes[8]=0xcc;
+  CHECK(length>=2&&bytes[1]==0&&length+7<=sizeof(routed.bytes));
+  std::memcpy(routed.bytes+9,bytes+2,length-2);routed.length=length+7;return routed;
+}
+static void meshcoreDistinctGroupMessages(){
+  scenario="MC same claimed name and timestamp are not a sender ID";reset();REQUIRE(start(Protocol::MeshCore));
+  CHECK(chat::workspaceBytes()==3424);const auto initialWrites=saveCalls;
+  mc::Frame first,second;CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","peer one",Epoch,0,mc::platformCrypto(),first));
+  CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","peer two",Epoch,0,mc::platformCrypto(),second));
+  chat::receive(first.bytes,first.length,1000,Epoch);CHECK(view().history_count==1);
+  chat::receive(second.bytes,second.length,2000,Epoch);CHECK(view().history_count==2);CHECK(!std::strcmp(view().history[0].text,"peer two"));
+  CHECK(!view().history[0].authenticated&&!view().history[0].direct);CHECK(view().contact_count==0);
+  const auto received=chat::diagnostics().rx_text;
+  chat::receive(first.bytes,first.length,3000,Epoch);auto routed=groupRoute(first.bytes,first.length);
+  chat::receive(routed.bytes,routed.length,4000,Epoch);CHECK(view().history_count==2);CHECK(chat::diagnostics().rx_text==received);
+  CHECK(saveCalls==initialWrites); // group dedupe is bounded RAM state, never private NVS history
+  // Invalid routing and bad ciphertext must not poison the validated cache.
+  mc::Frame fresh;CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","valid after malformed",Epoch,0,mc::platformCrypto(),fresh));
+  auto malformed=fresh;malformed.bytes[1]=0xc0;chat::receive(malformed.bytes,malformed.length,5000,Epoch);
+  malformed=fresh;malformed.bytes[malformed.length-1]^=1;chat::receive(malformed.bytes,malformed.length,6000,Epoch);
+  CHECK(view().history_count==2);chat::receive(fresh.bytes,fresh.length,7000,Epoch);CHECK(view().history_count==3);
+  CHECK(!view().history[0].authenticated);CHECK(saveCalls==initialWrites);chat::end();
+}
+static void meshcoreOwnGroupEchoes(){
+  scenario="MC own echo matches exact successful payload only";reset();REQUIRE(start(Protocol::MeshCore));CHECK(chat::setTransmit(true));
+  CHECK(chat::send(-1,nullptr,"first local text",5000,Epoch));mt::Frame first;REQUIRE(take(5000,first));CHECK(view().history_count==1);
+  CHECK(chat::send(-1,nullptr,"second local text",10000,Epoch+1));mt::Frame second;REQUIRE(take(10000,second));CHECK(view().history_count==2);
+  // A same-named peer is independent even when its clock is equal or behind.
+  mc::Frame incoming;CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","other same second",Epoch,0,mc::platformCrypto(),incoming));
+  chat::receive(incoming.bytes,incoming.length,11000,Epoch+1);CHECK(view().history_count==3);
+  CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","other earlier clock",Epoch-1,0,mc::platformCrypto(),incoming));
+  chat::receive(incoming.bytes,incoming.length,12000,Epoch+1);CHECK(view().history_count==4);CHECK(!view().history[0].authenticated);
+  const auto received=chat::diagnostics().rx_text;auto routed=groupRoute(first.bytes,first.length);
+  chat::receive(routed.bytes,routed.length,13000,Epoch+1);chat::receive(second.bytes,second.length,14000,Epoch+1);
+  CHECK(view().history_count==4);CHECK(chat::diagnostics().rx_text==received);
+  // A successfully sent advert must not suppress later same-name group traffic.
+  CHECK(chat::announce(15000,Epoch+2));mt::Frame advert;REQUIRE(take(15000,advert));
+  CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","peer after my advert",Epoch+2,0,mc::platformCrypto(),incoming));
+  chat::receive(incoming.bytes,incoming.length,16000,Epoch+2);CHECK(view().history_count==5);
+  // Echo suppression outlives the six visible history records, while still
+  // using only the fixed replay ring. Evict the first sent record from history.
+  for(unsigned i=0;i<3;++i){
+    char text[32];std::snprintf(text,sizeof(text),"later peer message %u",i);
+    CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel",text,Epoch+3+i,0,mc::platformCrypto(),incoming));
+    chat::receive(incoming.bytes,incoming.length,17000+i,Epoch+5);
+  }
+  CHECK(view().history_count==chat::HistoryCount);const auto afterLater=chat::diagnostics().rx_text;
+  chat::receive(routed.bytes,routed.length,18000,Epoch+5);CHECK(chat::diagnostics().rx_text==afterLater);
+  chat::end();
+}
+static void meshcoreGroupCacheRollover(){
+  scenario="MC group replay ring stays bounded across rollover";reset();REQUIRE(start(Protocol::MeshCore));
+  const auto writes=saveCalls;mc::Frame first,last;
+  for(unsigned i=0;i<40;++i){
+    char text[32];std::snprintf(text,sizeof(text),"distinct group %u",i);
+    CHECK(mc::groupText(mc::publicGroupKey(),16,"same claimed name",text,Epoch,0,mc::platformCrypto(),last));
+    if(!i)first=last;chat::receive(last.bytes,last.length,1000+i,Epoch);
+  }
+  CHECK(view().history_count==chat::HistoryCount);const auto received=chat::diagnostics().rx_text;
+  auto routed=groupRoute(last.bytes,last.length);chat::receive(routed.bytes,routed.length,2000,Epoch);
+  CHECK(chat::diagnostics().rx_text==received);CHECK(saveCalls==writes);CHECK(chat::workspaceBytes()==3424);
+  // Old entries can reappear after finite-cache eviction; this is duplicate
+  // suppression, not authenticated or persistent anti-replay protection.
+  chat::receive(first.bytes,first.length,3000,Epoch);CHECK(chat::diagnostics().rx_text==received+1);
+  CHECK(!view().history[0].authenticated);chat::end();
+}
+static void meshcoreFailedAndCancelledGroups(){
+  scenario="MC failed or cancelled sends never seed own-echo cache";reset();REQUIRE(start(Protocol::MeshCore));CHECK(chat::setTransmit(true));
+  CHECK(chat::send(-1,nullptr,"failed local frame",5000,Epoch));mt::Frame failed;REQUIRE(take(5000,failed,false));
+  CHECK(view().history_count==1&&view().history[0].delivery==chat::Delivery::Failed);
+  chat::receive(failed.bytes,failed.length,6000,Epoch);CHECK(view().history_count==2&&!view().history[0].outgoing);CHECK(!view().history[0].authenticated);
+  CHECK(chat::send(-1,nullptr,"cancelled local frame",10000,Epoch+1));CHECK(chat::setTransmit(false));
+  mc::Frame incoming;CHECK(mc::groupText(mc::publicGroupKey(),16,"LORA Tunnel","cancelled local frame",Epoch+1,0,mc::platformCrypto(),incoming));
+  chat::receive(incoming.bytes,incoming.length,11000,Epoch+1);CHECK(view().history_count==4&&!view().history[0].outgoing);
+  CHECK(!view().history[0].authenticated);chat::end();
+}
 int main(){
-  identityLifecycle();configBoundary();meshcoreTrustAndHistory();meshcoreRetryReceipts();storageFailureAndReplay();meshtasticRuntime();clockAndCancellation();meshtasticRetriesAndUnverifiedReceipts();privateChannelsAndFailures();meshtasticZeroHashChannel();meshcoreClockGate();borrowedFrameFailureLifetime();diagnosticEvidenceSurvivesExit();chat::end();
+  identityLifecycle();configBoundary();meshcoreTrustAndHistory();meshcoreRetryReceipts();storageFailureAndReplay();meshtasticRuntime();clockAndCancellation();meshtasticRetriesAndUnverifiedReceipts();privateChannelsAndFailures();meshtasticZeroHashChannel();meshcoreClockGate();borrowedFrameFailureLifetime();diagnosticEvidenceSurvivesExit();meshcoreDistinctGroupMessages();meshcoreOwnGroupEchoes();meshcoreGroupCacheRollover();meshcoreFailedAndCancelledGroups();chat::end();
   std::printf("Messaging actual-engine host: %u checks, %u failures; workspace=%zu bytes; zeroized releases=%u\n",checks,failures,chat::workspaceBytes(),released);
   return failures?1:0;
 }

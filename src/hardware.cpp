@@ -215,9 +215,13 @@ TouchState readTouch(uint16_t& x, uint16_t& y) {
     byte = static_cast<uint8_t>(value);
   }
   const uint8_t points = report[2] & 0x07;
+  // Section 1.3 defines the point count separately from the point records.
+  // With no contacts, point 1's event/coordinates may be stale or unused;
+  // they cannot invalidate a successfully read zero-contact release.
+  if (points == 0) return TouchState::Released;
   const uint8_t event = report[3] >> 6;
   if (points > 2 || event == 3) return TouchState::Unavailable;
-  if (points == 0 || event == 1) return TouchState::Released;
+  if (event == 1) return TouchState::Released;
   const uint16_t rawX = ((report[3] & 0x0f) << 8) | report[4];
   const uint16_t rawY = ((report[5] & 0x0f) << 8) | report[6];
   if (rawX >= board::DISPLAY_WIDTH || rawY >= board::DISPLAY_HEIGHT) return TouchState::Unavailable;

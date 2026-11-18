@@ -121,6 +121,132 @@ void test_region_change_resets_mesh_profile_and_preserves_keys() {
   TEST_ASSERT_EQUAL_STRING("meshtastic",document["lora"]["mode"]);
   TEST_ASSERT_TRUE(tunnel::parseConfigRadio(document.as<JsonVariantConst>(),settings));
 }
+void test_named_presets_derive_settings_and_accept_consistent_raw_fields() {
+  tunnel::RadioSettings settings;
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","meshtastic_preset":"LONG_TURBO","meshtastic_slot":0}})",settings));
+  TEST_ASSERT_EQUAL_STRING("LONG_TURBO",settings.meshtastic_preset);
+  TEST_ASSERT_EQUAL_UINT16(0,settings.meshtastic_slot);TEST_ASSERT_TRUE(settings.enabled);
+  TEST_ASSERT_TRUE(settings.frequency==908.750);TEST_ASSERT_TRUE(settings.bandwidth==500);
+  TEST_ASSERT_EQUAL_INT(11,settings.sf);TEST_ASSERT_EQUAL_INT(8,settings.cr);
+  TEST_ASSERT_EQUAL_INT(16,settings.preamble);
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"ANZ","meshtastic_preset":"LONG_TURBO","meshtastic_slot":14,"frequency_mhz":921.750,"bandwidth_khz":500,"spreading_factor":11,"coding_rate_denominator":8,"preamble_symbols":16}})",settings));
+  TEST_ASSERT_TRUE(settings.enabled);TEST_ASSERT_TRUE(settings.frequency==921.750);
+  TEST_ASSERT_EQUAL_UINT16(14,settings.meshtastic_slot);
+}
+void test_named_preset_conflicts_and_wrong_types_rejected() {
+  tunnel::RadioSettings settings;
+  const char* invalid[]={
+    R"({"meshtastic_preset":7})", R"({"meshtastic_preset":null})",
+    R"({"meshtastic_preset":"LongTurbo"})", R"({"meshtastic_preset":"LONG_TURBO\u0000x"})",
+    R"({"meshtastic_preset":"CUSTOM","meshtastic_slot":1})",
+    R"({"meshtastic_preset":"LONG_TURBO","meshtastic_slot":53})",
+    R"({"meshtastic_slot":-1})", R"({"meshtastic_slot":65536})",
+    R"({"meshtastic_slot":1.5})", R"({"meshtastic_slot":"14"})",
+    R"({"meshtastic_slot":true})", R"({"meshtastic_slot":null})",
+    R"({"meshtastic_preset":"LONG_TURBO","frequency_mhz":906.875})",
+    R"({"meshtastic_preset":"LONG_TURBO","bandwidth_khz":250})",
+    R"({"meshtastic_preset":"LONG_TURBO","spreading_factor":12})",
+    R"({"meshtastic_preset":"LONG_TURBO","coding_rate_denominator":5})",
+    R"({"meshtastic_preset":"LONG_TURBO","preamble_symbols":32})"
+  };
+  for(const char* json:invalid) {
+    document.clear();TEST_ASSERT_FALSE(deserializeJson(document,json));
+    StaticJsonDocument<2048> root;root["schema"]=1;
+    root["lora"].set(document.as<JsonObjectConst>());
+    root["lora"]["region"]="US";root["lora"]["enabled"]=true;
+    TEST_ASSERT_FALSE_MESSAGE(tunnel::parseConfigRadio(root.as<JsonVariantConst>(),settings),json);
+  }
+  TEST_ASSERT_FALSE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"EU_868","meshtastic_preset":"LONG_TURBO"}})",settings));
+}
+void test_legacy_custom_settings_stay_literal() {
+  tunnel::RadioSettings settings;
+  for(const bool namedRegion:{false,true}) {
+    TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"frequency_mhz":912.125,"bandwidth_khz":125,"spreading_factor":9,"coding_rate_denominator":7,"preamble_symbols":24}})",settings));
+    if(namedRegion)document["lora"]["region"]="US";
+    TEST_ASSERT_TRUE(tunnel::parseConfigRadio(document.as<JsonVariantConst>(),settings));
+    TEST_ASSERT_EQUAL_STRING("US",settings.region);TEST_ASSERT_EQUAL_STRING("CUSTOM",settings.meshtastic_preset);
+    TEST_ASSERT_TRUE(settings.frequency==912.125);TEST_ASSERT_TRUE(settings.bandwidth==125);
+    TEST_ASSERT_EQUAL_INT(9,settings.sf);TEST_ASSERT_EQUAL_INT(7,settings.cr);
+    TEST_ASSERT_EQUAL_INT(24,settings.preamble);TEST_ASSERT_TRUE(settings.enabled);
+    TEST_ASSERT_FALSE(document["lora"].containsKey("meshtastic_preset"));
+  }
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","meshtastic_preset":"CUSTOM","frequency_mhz":912.125,"bandwidth_khz":125}})",settings));
+  TEST_ASSERT_EQUAL_STRING("CUSTOM",settings.meshtastic_preset);TEST_ASSERT_TRUE(settings.frequency==912.125);
+  TEST_ASSERT_FALSE(parse(R"({"schema":1,"lora":{"enabled":true,"frequency_mhz":902.125,"bandwidth_khz":500}})",settings));
+  TEST_ASSERT_FALSE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","frequency_mhz":927.875,"bandwidth_khz":500}})",settings));
+}
+void test_cap_preset_import_disables_radio_without_retuning_or_losing_keys() {
+  tunnel::RadioSettings settings;
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","meshtastic_preset":"LONG_TURBO","meshtastic_slot":42}})",settings));
+  TEST_ASSERT_TRUE(settings.enabled);TEST_ASSERT_TRUE(settings.frequency==922.750);
+  document["lora"]["meshtastic_slot"]=43;
+  document["credentials"]["wifi_ssid"]="synthetic-network";
+  TEST_ASSERT_TRUE(tunnel::parseConfigRadio(document.as<JsonVariantConst>(),settings));
+  TEST_ASSERT_FALSE(settings.enabled);TEST_ASSERT_FALSE(settings.hardware_compatible);
+  TEST_ASSERT_TRUE(settings.frequency==923.250);TEST_ASSERT_EQUAL_UINT16(43,settings.meshtastic_slot);
+  TEST_ASSERT_EQUAL_STRING("synthetic-network",document["credentials"]["wifi_ssid"]);
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","meshtastic_preset":"SHORT_TURBO"}})",settings));
+  TEST_ASSERT_FALSE(settings.enabled);TEST_ASSERT_TRUE(settings.frequency==926.750);
+}
+void test_preset_save_roundtrip_preserves_unrelated_configuration() {
+  tunnel::RadioSettings settings;
+  TEST_ASSERT_TRUE(parse(R"({"schema":1,"lora":{"enabled":true,"region":"US","mode":"combined","meshcore_profile":"US-NARROW","dwell_ms":90000,"decode_public":false,"meshtastic_keys":[{"name":"BENCH","key_hex":""}],"meshcore_keys":[{"name":"LAB","key_hex":"000102030405060708090a0b0c0d0e0f"}]},"credentials":{"wifi_password":"synthetic-placeholder"},"future":{"retained":42}})",settings));
+  TEST_ASSERT_TRUE(tunnel::setConfigDocumentMeshtastic(document.as<JsonVariant>(),"LONG_TURBO",14));
+  TEST_ASSERT_EQUAL_STRING("LONG_TURBO",document["lora"]["meshtastic_preset"]);
+  TEST_ASSERT_EQUAL_UINT16(14,document["lora"]["meshtastic_slot"]);
+  TEST_ASSERT_EQUAL_STRING("combined",document["lora"]["mode"]);
+  TEST_ASSERT_EQUAL_STRING("US-NARROW",document["lora"]["meshcore_profile"]);
+  TEST_ASSERT_EQUAL_UINT32(90000,document["lora"]["dwell_ms"]);
+  TEST_ASSERT_FALSE(document["lora"]["decode_public"].as<bool>());
+  TEST_ASSERT_EQUAL_STRING("BENCH",document["lora"]["meshtastic_keys"][0]["name"]);
+  TEST_ASSERT_EQUAL_STRING("LAB",document["lora"]["meshcore_keys"][0]["name"]);
+  TEST_ASSERT_EQUAL_STRING("synthetic-placeholder",document["credentials"]["wifi_password"]);
+  TEST_ASSERT_EQUAL_INT(42,document["future"]["retained"]);
+  char serialized[2048];serializeJson(document,serialized,sizeof(serialized));
+  TEST_ASSERT_TRUE(parse(serialized,settings));TEST_ASSERT_TRUE(settings.enabled);
+  TEST_ASSERT_TRUE(settings.frequency==908.750);TEST_ASSERT_EQUAL_STRING("LONG_TURBO",settings.meshtastic_preset);
+  TEST_ASSERT_FALSE(tunnel::setConfigDocumentMeshtastic(document.as<JsonVariant>(),"SHORT_TURBO",0));
+  TEST_ASSERT_EQUAL_STRING("LONG_TURBO",document["lora"]["meshtastic_preset"]);
+}
+void test_meshcore_keys_validated_without_name_derived_identity() {
+  document.clear();TEST_ASSERT_FALSE(deserializeJson(document,R"({"meshcore_keys":[{"name":"Local label","key_hex":"000102030405060708090A0B0C0D0E0F"},{"name":"Other label","key_hex":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}]})"));
+  tunnel::mesh::Key output[4];uint8_t count=0;
+  TEST_ASSERT_TRUE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),output,count));
+  TEST_ASSERT_EQUAL_UINT8(2,count);TEST_ASSERT_EQUAL_UINT8(16,output[0].length);
+  TEST_ASSERT_EQUAL_UINT8(32,output[1].length);TEST_ASSERT_EQUAL_HEX8(0x0a,output[0].bytes[10]);
+  TEST_ASSERT_EQUAL_HEX8(0,output[0].channel_hash); // Derived from SHA256 by the crypto adapter, never this label.
+  TEST_ASSERT_TRUE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),nullptr,count));
+  TEST_ASSERT_EQUAL_UINT8(2,count);
+  document["meshcore_keys"][0]["name"]="Renamed locally";
+  tunnel::mesh::Key renamed[4];
+  TEST_ASSERT_TRUE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),renamed,count));
+  TEST_ASSERT_EQUAL_MEMORY(output[0].bytes,renamed[0].bytes,16);
+}
+void test_meshcore_keys_reject_plaintext_invalid_types_and_oversized_lists() {
+  tunnel::mesh::Key output[4];uint8_t count=99;
+  const char* invalid[]={
+    R"({"meshcore_keys":{}})", R"({"meshcore_keys":null})",
+    R"({"meshcore_keys":[{"name":"A","key_hex":""}]})",
+    R"({"meshcore_keys":[{"name":"A","key_hex":"AQ=="}]})",
+    R"({"meshcore_keys":[{"name":"A","key_hex":12}]})",
+    R"({"meshcore_keys":[{"name":"A","key_hex":"000102030405060708090a0b0c0d0e0g"}]})",
+    R"({"meshcore_keys":[{"name":"A\u0000B","key_hex":"000102030405060708090a0b0c0d0e0f"}]})",
+    R"({"meshcore_keys":[{"name":"","key_hex":"000102030405060708090a0b0c0d0e0f"}]})",
+    R"({"meshcore_keys":[{"name":false,"key_hex":"000102030405060708090a0b0c0d0e0f"}]})",
+    R"({"meshcore_keys":[{"name":"A","key_hex":"000102030405060708090a0b0c0d0e0f\u0000"}]})"
+  };
+  for(const char* json:invalid) {
+    document.clear();TEST_ASSERT_FALSE(deserializeJson(document,json));
+    TEST_ASSERT_FALSE_MESSAGE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),output,count),json);
+  }
+  document.clear();TEST_ASSERT_TRUE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),output,count));
+  TEST_ASSERT_EQUAL_UINT8(0,count);
+  auto entries=document.createNestedArray("meshcore_keys");
+  for(unsigned i=0;i<4;++i){auto entry=entries.createNestedObject();entry["name"]="BENCH";entry["key_hex"]="000102030405060708090a0b0c0d0e0f";}
+  TEST_ASSERT_TRUE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),output,count));
+  TEST_ASSERT_EQUAL_UINT8(4,count);entries.add(entries[0]);
+  TEST_ASSERT_FALSE(tunnel::parseMeshCoreKeys(document.as<JsonVariantConst>(),output,count));
+}
 int main(int,char**) {
   UNITY_BEGIN();
   RUN_TEST(test_legacy_defaults_and_explicit_three_modes);
@@ -132,5 +258,12 @@ int main(int,char**) {
   RUN_TEST(test_aes256_hex_case_and_key_count_bound);
   RUN_TEST(test_malformed_key_names_hex_and_nuls_rejected);
   RUN_TEST(test_region_change_resets_mesh_profile_and_preserves_keys);
+  RUN_TEST(test_named_presets_derive_settings_and_accept_consistent_raw_fields);
+  RUN_TEST(test_named_preset_conflicts_and_wrong_types_rejected);
+  RUN_TEST(test_legacy_custom_settings_stay_literal);
+  RUN_TEST(test_cap_preset_import_disables_radio_without_retuning_or_losing_keys);
+  RUN_TEST(test_preset_save_roundtrip_preserves_unrelated_configuration);
+  RUN_TEST(test_meshcore_keys_validated_without_name_derived_identity);
+  RUN_TEST(test_meshcore_keys_reject_plaintext_invalid_types_and_oversized_lists);
   return UNITY_END();
 }

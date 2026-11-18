@@ -76,11 +76,15 @@ void test_default_key_and_nonce_contract() {
   // This fixture verifies the adapter contract, not AES itself. The adapter's
   // independent cryptographic known-answer tests are separate.
 }
-void test_public_key_renamed_channel_and_aead_hint() {
+void test_public_key_long_turbo_and_all_channel_hashes() {
   Bytes node;text(node,2,"Renamed");
-  TEST_ASSERT_EQUAL(int(Status::Decoded),int(publicFrame(data(4,node),false,0x55).status));
-  cryptoCalls=0;const auto unsupported=publicFrame(data(4,node),false,0xa6);
-  TEST_ASSERT_EQUAL_UINT(0,cryptoCalls);TEST_ASSERT_EQUAL(int(Status::Unsupported),int(unsupported.status));
+  // Default LongTurbo is 0x76, LongFast 0x08. Renamed channels and cipher
+  // discriminator hashes can collide; no eight-bit hash excludes valid CTR.
+  for(unsigned hash=0;hash!=256;++hash) {
+    cryptoCalls=0;const auto decoded=publicFrame(data(4,node),false,std::uint8_t(hash));
+    TEST_ASSERT_EQUAL_UINT(1,cryptoCalls);
+    TEST_ASSERT_EQUAL(int(Status::Decoded),int(decoded.status));
+  }
 }
 void test_negative_coordinates_altitude_and_explicit_zero() {
   Bytes position;fixed(position,1,std::uint32_t(-338651430));fixed(position,2,1512099000);
@@ -153,7 +157,7 @@ void test_unmatched_keys_and_missing_crypto_keep_raw_packet_status() {
   decodeMeshtastic(bytes.data(),bytes.size(),Crypto{},&key,1,false,out);
   TEST_ASSERT_EQUAL(int(Status::Encrypted),int(out.status));TEST_ASSERT_FALSE(out.has_node);
   decodeMeshtastic(bytes.data(),bytes.size(),Crypto{},nullptr,0,true,out);
-  TEST_ASSERT_EQUAL(int(Status::KeyMismatch),int(out.status));
+  TEST_ASSERT_EQUAL(int(Status::Encrypted),int(out.status));
 }
 void test_null_oversize_and_all_truncated_frame_bounds() {
   const std::uint8_t tiny[]={0};Result out;
@@ -181,7 +185,7 @@ void test_deterministic_malformed_inputs_are_bounded() {
 int main(int,char**) {
   UNITY_BEGIN();
   RUN_TEST(test_nodeinfo_plaintext_and_zero_fields);RUN_TEST(test_default_key_and_nonce_contract);
-  RUN_TEST(test_public_key_renamed_channel_and_aead_hint);RUN_TEST(test_negative_coordinates_altitude_and_explicit_zero);
+  RUN_TEST(test_public_key_long_turbo_and_all_channel_hashes);RUN_TEST(test_negative_coordinates_altitude_and_explicit_zero);
   RUN_TEST(test_missing_coordinates_do_not_create_position);RUN_TEST(test_invalid_coordinate_range_and_known_wire_type);
   RUN_TEST(test_device_metrics_presence_and_finite_voltage);RUN_TEST(test_text_is_bounded_sanitized_and_signature_unverified);
   RUN_TEST(test_duplicate_known_fields_and_oversized_varints_rejected);RUN_TEST(test_unknown_fields_skip_safely_and_unknown_port_is_unsupported);

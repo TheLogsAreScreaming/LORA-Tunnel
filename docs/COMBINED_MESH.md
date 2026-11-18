@@ -1,14 +1,14 @@
 # Combined Meshtastic and MeshCore observation
 
-LORA Tunnel 0.5.0 provides a shared LoRa capture path with separate Meshtastic and MeshCore decoders. Wardriver sessions can stay on one protocol or alternate between a selected profile for each protocol. The device saves received radio bytes and radio settings before attempting to decode them, so later software can revisit incomplete or unsupported results.
+LORA Tunnel provides a shared LoRa capture path with separate Meshtastic and MeshCore decoders. This development branch extends the published 0.5.0 implementation with selectable Meshtastic modem presets, including Long Turbo, and receive-only MeshCore group-text decoding. Wardriver sessions can stay on one protocol or alternate between one selected profile for each protocol. The device saves received radio bytes and radio settings before attempting to decode them, so later software can revisit incomplete or unsupported results.
 
 This document describes the source implementation. It does not certify a successful hardware capture, flash, drive, or service upload. The validation checklist below separates host checks from physical acceptance. The supported subset is listed explicitly; this is not a claim of complete Kismet decoder parity.
 
-[Completed software checks and remaining physical acceptance](COMBINED_MESH_VALIDATION.md).
+[Earlier 0.5.0 validation](COMBINED_MESH_VALIDATION.md) remains a historical record. Physical acceptance of the new presets, group decoder and settings controls is **pending**; the earlier results do not certify this development build.
 
 ## Choose a mode
 
-Select the correct region first. While the session is stopped, open **Settings** and select the **LoRa** mode control. Each selection cycles through **Meshtastic**, **MeshCore**, and **Both / slow scan**. The setting is saved to the SD configuration. A mode requiring MeshCore is rejected when the selected region has no supported MeshCore receive profile. Recon mode retains its Wi-Fi/BLE detection behavior; this LoRa feature belongs to Wardriver mode.
+Select the correct region first. While the session is stopped, open **Settings → Mesh radio / decode settings**. The dedicated page offers the mode (**Meshtastic**, **MeshCore** or **Both / slow scan**), Meshtastic preset and slot, MeshCore profile, dwell and public decoding. Open a field, choose a value and save; cancel leaves its current value unchanged. Settings save to the SD configuration. Changes require capture and saving to finish, uploads to be idle and SD to be available. A mode requiring MeshCore is rejected when the selected region has no supported MeshCore receive profile. Recon mode retains its Wi-Fi/BLE detection behavior; this LoRa feature belongs to Wardriver mode.
 
 The LoRa view shows the active profile, decoded/other totals, and the time until the next profile change when combined scanning is active. Received nodes retain protocol-specific identities. Display summaries can combine later sightings of a node, while the observation log retains each received packet.
 
@@ -20,7 +20,25 @@ Combined mode uses a configurable dwell of **30–600 seconds per profile**. The
 
 ## Receive profiles
 
-Existing Meshtastic region settings continue to select their LongFast starting profile, with validated custom frequency/modem settings available in SD configuration. The following MeshCore selections are included. `AUTO` chooses the first listed profile for that region; it does not detect a community's settings automatically.
+Choose the Meshtastic modem preset and slot while capture is stopped. A region selection starts from LongFast. Selecting another preset changes bandwidth, spreading factor, coding rate and its default channel-name-derived frequency; changing only the displayed name would not tune the radio correctly. The slot selector uses `0` for the preset's default channel slot and positive, one-based slots for a specific community. Match the transmitter's modem and frequency settings; an encryption key cannot compensate for the wrong receive settings.
+
+| Meshtastic setting | Default channel name | Bandwidth kHz | SF | Configured CR | US default slot | US frequency MHz |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| `LONG_FAST` | LongFast | 250 | 11 | 4/5 | 20 | 906.875 |
+| `LONG_TURBO` | LongTurbo | 500 | 11 | 4/8 | 14 | 908.750 |
+| `LONG_MODERATE` | LongMod | 125 | 11 | 4/8 | 6 | 902.6875 |
+| `LONG_SLOW` | LongSlow | 125 | 12 | 4/8 | 27 | 905.3125 |
+| `MEDIUM_FAST` | MediumFast | 250 | 9 | 4/5 | 45 | 913.125 |
+| `MEDIUM_SLOW` | MediumSlow | 250 | 10 | 4/5 | 52 | 914.875 |
+| `SHORT_FAST` | ShortFast | 250 | 7 | 4/5 | 68 | 918.875 |
+| `SHORT_SLOW` | ShortSlow | 250 | 8 | 4/5 | 75 | 920.625 |
+| `SHORT_TURBO` | ShortTurbo | 500 | 7 | 4/5 | 50 | 926.750 |
+
+All listed Meshtastic presets use a 16-symbol preamble and sync word `0x2B`. In ANZ, LongTurbo defaults to slot 14 at **921.750 MHz**. Europe 868's 869.4–869.65 MHz region is too narrow for either 500 kHz Turbo preset; selection is rejected without falling back to LongFast. [Inspected modem parameters](https://github.com/meshtastic/firmware/blob/6d41e279f1f51bd59f687b9d441c1bf47b1594fc/src/mesh/MeshRadio.h), [frequency-slot calculation](https://github.com/meshtastic/firmware/blob/6d41e279f1f51bd59f687b9d441c1bf47b1594fc/src/mesh/RadioInterface.cpp).
+
+The entire occupied bandwidth must fit both the region and the board. The Heltec supports US LongTurbo slots 1–52 and ANZ slots 1–26; the narrower U214 supports US slots 1–42 and ANZ slots 1–16. US ShortTurbo's default frequency fits the Heltec but exceeds the U214 maximum of 923 MHz. A compatible custom slot may still be used. Invalid slot numbers are rejected rather than wrapped. Existing SD files with custom raw radio fields and no named preset retain those exact settings and appear as `CUSTOM`.
+
+The following MeshCore selections are included. `AUTO` chooses the first listed profile for that region; it does not detect a community's settings automatically.
 
 | Region | MeshCore selection | Frequency MHz | Bandwidth kHz | SF | Configured CR |
 | --- | --- | ---: | ---: | ---: | --- |
@@ -55,7 +73,9 @@ AES-CTR does not authenticate the sender. A valid protobuf result, matching chan
 
 Public MeshCore node advertisements contain a public identity key, timestamp, signature and optional application fields. LORA Tunnel parses the available name, reported role and advertised position, and verifies the Ed25519 advert signature when the firmware crypto adapter is present. The signed data excludes mutable routing/path fields. A verified signature establishes that the advert was signed for that key; it does not establish the truth of its location, ownership, proximity or freshness.
 
-The parser validates current one-, two- and three-byte path-hash layouts, transport-header lengths and payload bounds. It records packet type, path count and hash width. Supported acknowledgment shape is recognized without inventing a node identity. Encrypted message envelopes remain identifiable as encrypted/unknown or unsupported, and raw bytes remain available. MeshCore group-message decryption, direct-message decryption and other application-specific payload decoding are not included in this milestone. A displayed group sender name would require separate trust handling if group decoding is added later. [MeshCore packet format](https://github.com/meshcore-dev/MeshCore/blob/81dbae592ffad40b4212bc0b37e82b38da08f4bc/docs/packet_format.md), [MeshCore payload format](https://github.com/meshcore-dev/MeshCore/blob/81dbae592ffad40b4212bc0b37e82b38da08f4bc/docs/payloads.md)
+The parser validates current one-, two- and three-byte path-hash layouts, transport-header lengths and payload bounds. It records packet type, path count and hash width. Supported acknowledgment shape is recognized without inventing a node identity. Compatible group-text packets can be decrypted with the published Public group key or up to four explicitly configured group keys. Group decoding checks the two-byte channel MAC before decrypting and reports `channel_mac_valid` separately from sender authentication. A short shared-key MAC and a self-asserted sender name do not authenticate a particular node. Group text therefore does not create an advertised node identity or position.
+
+Ordinary group text includes its reported timestamp and bounded text, with an optional name parsed from the conventional `name: text` prefix. The original raw packet is retained. Group data, non-text subtypes, direct-message decryption and other application-specific payload decoding remain unsupported; unknown encrypted payloads stay classified as such. No messages, acknowledgments or advertisements are sent. [MeshCore packet format](https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/packet_format.md), [MeshCore payload format](https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/payloads.md).
 
 ## SD configuration
 
@@ -64,23 +84,30 @@ Start from [config.example.json](../sdcard/lora-tunnel/config.example.json), sav
 ```json
 {
   "mode": "combined",
+  "meshtastic_preset": "LONG_TURBO",
+  "meshtastic_slot": 0,
   "dwell_ms": 30000,
   "meshcore_profile": "AUTO",
   "decode_public": true,
-  "meshtastic_keys": []
+  "meshtastic_keys": [],
+  "meshcore_keys": []
 }
 ```
 
-This fragment is not a complete configuration. Merge it into the existing `lora` object; preserve the region and other settings. Existing files without these fields retain Meshtastic-only behavior.
+This fragment is not a complete configuration. It illustrates a US or ANZ LongTurbo selection, not a valid selection for every region. Merge it into the existing `lora` object and preserve unrelated settings. When changing a named preset, remove the old `frequency_mhz`, `bandwidth_khz`, `spreading_factor`, `coding_rate_denominator` and `preamble_symbols` fields so they derive from the new preset, or replace all five with consistent values. Conflicting raw and named settings are rejected. Using the on-device selectors saves consistent values automatically. Existing files without a mode remain Meshtastic-only; existing custom raw configurations are preserved.
 
-`decode_public` attempts the published Meshtastic default key. It also works with a renamed ordinary channel using that key, subject to supported framing. Setting it to false does not disable public MeshCore advert parsing or remove explicitly supplied Meshtastic keys.
+Use `meshtastic_preset: "CUSTOM"` with `meshtastic_slot: 0` for literal raw radio settings. A custom channel name is independent of the modem preset and may select a different frequency slot on its transmitting nodes. Enter that actual slot; the receiver does not infer it from the private-key label. Save mode, presets, slots, dwell and keys on a working SD card. NVS recovery currently retains only the region choice and reconstructs its LongFast starting profile; it does not back up these additional settings or private keys. Keep a private SD configuration backup if exact recovery is required.
+
+`decode_public` attempts the published Meshtastic default key and MeshCore Public group key. It also works with a renamed ordinary Meshtastic channel using that key, subject to supported framing. Setting it to false does not disable public MeshCore advert parsing or remove explicitly supplied keys for either protocol.
 
 `meshtastic_keys` accepts at most four objects, each containing:
 
 - `name`: the exact, case-sensitive channel name, 1–39 UTF-8 bytes. The channel name can differ from the modem preset name.
 - `key_hex`: the expanded AES key as exactly 32 or 64 hexadecimal characters. An empty string explicitly configures plaintext for that channel. Base64 shortcuts such as `AQ==` are not accepted in this field; the published default is already covered by `decode_public`.
 
-Private channel keys are separate from WiGLE or WDGWars API credentials. Keys are read from the private SD configuration and are not included in observations, status output or examples. Configure these protocol keys through the SD file; the existing connection-key keyboard is for upload/network credentials. The firmware computes the eight-bit channel hash from the name and key and tries matching entries within a fixed bound. A hash collision does not establish identity or successful decryption.
+`meshcore_keys` independently accepts at most four objects. Each has a local descriptive `name` of 1–39 UTF-8 bytes and a `key_hex` containing exactly 32 or 64 hexadecimal characters. Empty/plaintext keys and Base64 shortcuts are not accepted. MeshCore derives its group hash from the first byte of SHA256 of the original 16-byte or 32-byte key; the local label is not part of the hash. The first 16 bytes supply AES-128, while the channel MAC uses the full key, zero-padded to 32 bytes when necessary.
+
+Private channel keys are separate from WiGLE or WDGWars API credentials. Keys are read from the private SD configuration and are not included in observations, status output or examples. Configure these protocol keys through the SD file; the existing connection-key keyboard is for upload/network credentials. The firmware tries matching entries within a fixed bound. For Meshtastic, the eight-bit channel hash depends on both the exact name and key. Neither protocol's short channel hash establishes identity or successful decryption.
 
 ## Logs and trust
 
@@ -101,13 +128,14 @@ These additions do not by themselves establish WiGLE LoRa support or a WDGWars m
 | Meshtastic names, positions, ordinary text and device metrics | Supported with compatible plaintext/default/configured-key AES-CTR payloads |
 | MeshCore public adverts | Parsed, with Ed25519 signature result reported separately |
 | One selected profile for each protocol in one session | Supported through slow automatic rotation |
-| Arbitrary preset lists / all Kismet regions | Not yet implemented; current MeshCore presets are listed above |
-| MeshCore encrypted group text | Not yet implemented |
+| Meshtastic LongTurbo and eight other named presets | Implemented with default/explicit slot selection, occupied-band validation and legacy CUSTOM preservation; physical acceptance pending |
+| Arbitrary hopping lists / all Kismet regions | Not implemented; combined mode rotates only the selected Meshtastic and MeshCore profiles |
+| MeshCore encrypted group text | Implemented for Public or configured compatible keys; MAC result separate from sender authentication; physical acceptance pending |
 | Meshtastic optional AEAD and XEdDSA verification | Not yet implemented |
 | Private PKI direct-message decryption | Not available to a passive observer without endpoint secrets |
 | Kismet server, datasource protocol or PCAP-NG compatibility | Not supplied by these changes; local capture remains JSONL |
 | Continuous reception of two differing radio profiles | Requires separate receiver hardware |
 
-Host tests exercise malformed/truncated packets, bounded lengths, missing fields, signed-coordinate encoding, default-key/nonce handling, explicit private-key configuration, wrong-key results, MeshCore path formats, signature verification, configuration recovery semantics and the scheduler. Synthetic fixtures use invented node data and public/test keys. Firmware builds validate the pinned Heltec and Cardputer targets; compilation does not establish radio performance.
+Host tests exercise malformed/truncated packets, bounded lengths, missing fields, signed-coordinate encoding, default-key/nonce handling, explicit key configuration, wrong-key results, MeshCore path formats, signature verification, configuration recovery semantics and the scheduler. Added preset/configuration tests cover LongTurbo US/ANZ defaults, region and board bounds, invalid types and slots, conflicting raw fields, legacy CUSTOM retention and preservation of unrelated settings. Group fixtures exercise Public and configured keys, channel-MAC failure, padding and unsupported subtypes. Synthetic fixtures use invented node data and public/test keys. Firmware builds validate the pinned Heltec and Cardputer targets; compilation does not establish radio performance.
 
-Before release acceptance, use a known transmitter for each protocol and compare its configured settings, name and advertised location against both raw and decoded records. Test each locked profile first, then combined mode, including a packet spanning a scheduled change. Verify that each queued record retains the profile that received it, observe counters and UI responsiveness during SD writes, repeat stop/start and region/mode changes, and inspect missing-GPS and storage-failure behavior. Measure packet coverage and memory/stack headroom on both targets. No physical results should be claimed until those checks have evidence.
+Before release acceptance, use a known transmitter for each protocol and compare its configured settings, name and advertised location against both raw and decoded records. Test LongFast and LongTurbo with their actual slots, public and configured-key messages, locked MeshCore reception and group text, then combined mode, including a packet spanning a scheduled change. Verify that each queued record retains the profile that received it, observe counters and UI responsiveness during SD writes, repeat stop/start and region/mode/preset changes, and verify SD persistence after reboot. Measure packet coverage and memory/stack headroom on both targets. These physical checks are pending; no new physical results should be claimed until those checks have evidence.

@@ -33,6 +33,7 @@ if(type==2 || type==5) {
   new (&event.mesh_data) mesh::Result{};
   auto& m=event.mesh_data;m.protocol=type==2?mesh::Protocol::Meshtastic:mesh::Protocol::MeshCore;
   m.status=mesh::Status::Decoded;m.authentication=mesh::Authentication::Unverified;
+  m.channel_mac_valid=type==5;
   m.has_node=m.has_position=m.has_altitude=m.has_time=m.has_text=m.has_battery=m.has_voltage=m.has_hardware=m.has_role=true;
   std::memset(m.name,'"',39);std::memset(m.short_name,'S',4);std::memset(m.text,'\\',159);
   std::memset(m.public_key,0xaa,32);m.latitude_i=123450000;m.longitude_i=-456700000;m.altitude=-400;
@@ -55,6 +56,9 @@ else {
  if(std::fabs(parsed["lora"]["decoded"]["advertised_position"]["lat"].as<double>()-12.345)>0.000001 || parsed["gps"]["lat"].as<double>()!=event.gps.lat)return 8;++checks;
  if(parsed["lora"]["decoded"]["text"].as<std::string>().size()!=159 || !parsed["lora"]["decoded"]["external_power"].as<bool>())return 9;++checks;
  if(type==5 && std::strlen(parsed["lora"]["decoded"]["public_key_hex"].as<const char*>())!=64)return 10;++checks;
+ if(parsed["lora"]["decoder_version"].as<unsigned>()!=2 ||
+    parsed["lora"]["decoded"]["channel_mac_valid"].as<bool>()!=(type==5) ||
+    parsed["lora"]["decoded"]["authentication"]!="unverified")return 12;++checks;
 }}
 if(type==4 && parsed["lora_coverage"]["meshcore_listen_ms"].as<unsigned>()!=31000)return 11;
 std::cout<<"kind="<<type<<" target_document_bytes="<<projected<<" serialized_bytes="<<used<<"\n";

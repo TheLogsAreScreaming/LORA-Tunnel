@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Original bounded parser for public MeshCore wire facts. No upstream parser
 // implementation or generated code is included. Protocol references:
-// https://github.com/meshcore-dev/MeshCore/blob/81dbae592ffad40b4212bc0b37e82b38da08f4bc/docs/packet_format.md
-// https://github.com/meshcore-dev/MeshCore/blob/81dbae592ffad40b4212bc0b37e82b38da08f4bc/docs/payloads.md
-// Signature message and limits checked against Mesh.cpp and MeshCore.h at the
+// https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/packet_format.md
+// https://github.com/meshcore-dev/MeshCore/blob/75b04ef06def54b348400cb1b138afb6749ffd4f/docs/payloads.md
+// Signature and group crypto checked against Mesh.cpp, Utils.cpp,
+// helpers/BaseChatMesh.cpp and examples/companion_radio/MyMesh.cpp at the
 // same revision. This decoder observes packets; it never joins or transmits.
 #include "mesh_decode.h"
 #include "text_sanitize.h"
@@ -16,6 +17,22 @@ constexpr std::size_t MaxPath = 64;
 constexpr std::size_t MaxPayload = 184;
 constexpr std::size_t AdvertPrefix = 100; // key32 + time4 + signature64
 constexpr std::size_t MaxAdvertData = 32;
+constexpr std::uint8_t PublicGroupKey[16] = {
+    0x8b,0x33,0x87,0xe9,0xc5,0xcd,0xea,0x6a,0xc9,0xe5,0xed,0xba,0xa1,0x15,0xcd,0x72
+};
+
+void erase(std::uint8_t* bytes, std::size_t length) {
+    volatile std::uint8_t* p = bytes;
+    while (length--) *p++ = 0;
+}
+
+struct GroupScratch {
+    std::uint8_t secret[32]{}, digest[32]{}, plain[176]{};
+    ~GroupScratch() {
+        erase(secret, sizeof(secret)); erase(digest, sizeof(digest));
+        erase(plain, sizeof(plain));
+    }
+};
 
 std::uint32_t little32(const std::uint8_t* p) {
     return std::uint32_t(p[0]) | (std::uint32_t(p[1]) << 8) |
@@ -33,10 +50,67 @@ bool cipherEnvelope(std::size_t length, std::size_t prefix) {
     // at least one complete AES block. This checks shape, not authenticity.
     return length >= prefix + 16 && (length - prefix) % 16 == 0;
 }
+
+void decodeGroup(const std::uint8_t* payload, std::size_t length,
+                 const Crypto& crypto, const Key* keys, std::size_t keyCount,
+                 bool publicDefault, Result& out) {
+    if (!crypto.sha256 || !crypto.hmac || !crypto.ecb) return;
+    if (!keys) keyCount = 0;
+    if (keyCount > MaxKeys) keyCount = MaxKeys;
+    GroupScratch scratch;
+    const std::size_t cipherLength = length - 3;
+    bool mismatched = false;
+    for (std::size_t index = 0; index < keyCount + (publicDefault ? 1u : 0u); ++index) {
+        const bool usePublic = index == keyCount;
+        const std::uint8_t* key = usePublic ? PublicGroupKey : keys[index].bytes;
+        const std::size_t keyLength = usePublic ? sizeof(PublicGroupKey) : keys[index].length;
+        if (keyLength != 16 && keyLength != 32) continue;
+        if (!crypto.sha256(key, keyLength, scratch.digest) || scratch.digest[0] != payload[0]) continue;
+        // AES always uses the first 16 bytes. HMAC uses the full 32-byte secret;
+        // 128-bit channel keys are zero-padded, as in upstream GroupChannel.
+        std::memset(scratch.secret, 0, sizeof(scratch.secret));
+        std::memcpy(scratch.secret, key, keyLength);
+        if (!crypto.hmac(scratch.secret, sizeof(scratch.secret), payload + 3,
+                         cipherLength, scratch.digest)) continue;
+        const unsigned difference = unsigned(scratch.digest[0] ^ payload[1]) |
+                                    unsigned(scratch.digest[1] ^ payload[2]);
+        if (difference) { mismatched = true; continue; }
+        out.channel_mac_valid = true;
+        out.authentication = Authentication::Unverified;
+        if (out.packet_type != 5) { out.status = Status::Unsupported; return; }
+        if (!crypto.ecb(scratch.secret, payload + 3, cipherLength, scratch.plain)) {
+            out.status = Status::Unsupported; return;
+        }
+        // Only plain group text is supported. Low two flag bits are retries.
+        if (scratch.plain[4] >> 2) { out.status = Status::Unsupported; return; }
+        std::size_t textLength = 0;
+        while (5 + textLength < cipherLength && scratch.plain[5 + textLength]) ++textLength;
+        // Zero padding is part of the encrypted envelope, not displayed text.
+        // Reject embedded NUL followed by nonzero data rather than hiding it.
+        for (std::size_t i = 5 + textLength; i < cipherLength; ++i) {
+            if (scratch.plain[i]) { out.status = Status::Malformed; return; }
+        }
+        out.timestamp = little32(scratch.plain);
+        out.has_time = out.timestamp != 0;
+        out.has_text = true;
+        out.sanitized = copyUtf8Bounded(out.text, sizeof(out.text), scratch.plain + 5, textLength);
+        for (std::size_t i = 1; i + 1 < textLength && i < sizeof(out.name); ++i) {
+            if (scratch.plain[5 + i] == ':' && scratch.plain[6 + i] == ' ') {
+                out.sanitized |= copyUtf8Bounded(out.name, sizeof(out.name), scratch.plain + 5, i);
+                break;
+            }
+        }
+        // A sender name in group text is self-asserted, not a node identity.
+        out.status = Status::Decoded;
+        return;
+    }
+    if (mismatched) out.status = Status::KeyMismatch;
+}
 } // namespace
 
 void decodeMeshCore(const std::uint8_t* data, std::size_t length,
-                    const Crypto& crypto, Result& out) {
+                    const Crypto& crypto, Result& out,
+                    const Key* keys, std::size_t keyCount, bool publicDefault) {
     out = Result{};
     out.protocol = Protocol::MeshCore;
     out.status = Status::Malformed;
@@ -71,7 +145,10 @@ void decodeMeshCore(const std::uint8_t* data, std::size_t length,
             if (cipherEnvelope(payloadLength, 4)) out.status = Status::Encrypted;
             break;
         case 5: case 6: // channel hash + MAC
-            if (cipherEnvelope(payloadLength, 3)) out.status = Status::Encrypted;
+            if (cipherEnvelope(payloadLength, 3)) {
+                out.status = Status::Encrypted;
+                decodeGroup(payload, payloadLength, crypto, keys, keyCount, publicDefault, out);
+            }
             break;
         case 7: // destination hash + ephemeral public key + MAC
             if (cipherEnvelope(payloadLength, 35)) out.status = Status::Encrypted;

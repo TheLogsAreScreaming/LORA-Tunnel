@@ -217,6 +217,7 @@
       "properties": {
         "authentication": {"enum": ["none", "unverified", "verified", "failed"]},
         "signature_present": {"type": "boolean"},
+        "channel_mac_valid": {"type": "boolean", "description": "MeshCore group ciphertext passed its two-byte shared-channel MAC. This is not sender authentication; group text remains unverified."},
         "text_sanitized_or_truncated": {"type": "boolean", "description": "One or more names/text fields required invalid-byte/control replacement or bounded truncation. The original bytes remain available in the raw radio packet."},
         "port": {"type": "integer", "minimum": 0, "maximum": 511, "description": "Meshtastic application port; zero when no valid Data envelope was decoded."},
         "packet_type": {"type": "integer", "minimum": 0, "maximum": 15, "description": "MeshCore payload type from its bounded header parser."},

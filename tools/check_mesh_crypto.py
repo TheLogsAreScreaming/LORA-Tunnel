@@ -1,7 +1,7 @@
 """Validate real mesh parsers against independent cryptographic wire fixtures.
 
 Requires the pinned rweather Crypto package installed by a firmware build.
-Compiles its host AES and Ed25519 implementations with the real parsers. This
+Compiles its host AES, SHA256/HMAC and Ed25519 implementations with the real parsers. This
 does not replace or claim runtime testing of the ESP32 SDK mbedTLS AES adapter.
 Fixtures are embedded public/synthetic bytes; no Python crypto dependency,
 network, key generation, user configuration, captured logs or radio is used.
@@ -48,7 +48,7 @@ def check(crypto: Path) -> str:
     environment = os.environ.copy()
     environment["PATH"] = str(Path(cxx).parent) + os.pathsep + environment.get("PATH", "")
     sources = ["AESCommon.cpp", "AES128.cpp", "AES256.cpp", "BlockCipher.cpp",
-               "Crypto.cpp", "BigNumberUtil.cpp", "Curve25519.cpp", "Ed25519.cpp", "Hash.cpp", "SHA512.cpp"]
+               "Crypto.cpp", "BigNumberUtil.cpp", "Curve25519.cpp", "Ed25519.cpp", "Hash.cpp", "SHA512.cpp", "SHA256.cpp"]
     limb = crypto / "utility/LimbUtil.cpp"
     if limb.is_file():
         sources.append("utility/LimbUtil.cpp")

@@ -121,12 +121,62 @@ int main(int argc,char** argv) {
   model.running=true;focus=3;const size_t uploadCount=sent.size();key(input::KeyCode::Select,model);expect(sent.size()==uploadCount,"manual upload blocked during capture");expect(screenHas("Stop and save before upload"),"blocked manual upload has visible explanation");
   model.running=false;key(input::KeyCode::Select,model);expect(sent.back().action==ui::Action::UploadNow && sent.back().field==0,"manual WiGLE upload requested");
   model.upload_busy=true;focus=6;key(input::KeyCode::Select,model);expect(sent.back().action==ui::Action::CancelUpload,"upload cancellation reachable");model.upload_busy=false;
-  show(Page::Settings);focus=6;model.lora_mode=0;key(input::KeyCode::Select,model);
-  expect(sent.back().action==ui::Action::SaveLoRaMode && sent.back().field==1,"MeshCore scan mode reachable");
-  model.lora_mode=1;key(input::KeyCode::Select,model);
-  expect(sent.back().field==2,"Combined scan mode reachable");
-  model.lora_mode=2;capture(output,"settings-combined",model);key(input::KeyCode::Select,model);
-  expect(sent.back().field==0,"Meshtastic lock reachable from combined mode");
+  std::strcpy(model.region,"US");model.region_configured=true;model.meshtastic_slots=104;
+  show(Page::Settings);focus=6;model.lora_mode=0;const size_t meshBefore=sent.size();key(input::KeyCode::Select,model);
+  expect(page==Page::MeshSettings && sent.size()==meshBefore,"Mesh settings opens without changing the receive mode");
+  capture(output,"mesh-settings",model);key(input::KeyCode::Select,model);
+  expect(page==Page::MeshChoice && meshField==ui::mesh_settings::Protocol,"protocol chooser opens with current selection");
+  key(input::KeyCode::Down,model);key(input::KeyCode::Down,model);
+  expect(meshChoice==2 && sent.size()==meshBefore,"choice navigation previews without saving or retuning");
+  capture(output,"mesh-protocol",model);key(input::KeyCode::Select,model);
+  expect(page==Page::MeshSettings && sent.size()==meshBefore+1 && sent.back().action==ui::Action::SaveLoRaMode && sent.back().field==2,"Enter requests exactly one combined-mode save");
+  model.lora_mode=2;focus=1;key(input::KeyCode::Select,model);key(input::KeyCode::Down,model);
+  expect(meshChoice==1 && screenHas("908.750 MHz / 500 kHz"),"LongTurbo previews its own default slot and modem bandwidth");
+  capture(output,"mesh-long-turbo",model);key(input::KeyCode::Select,model);
+  expect(sent.back().action==ui::Action::SaveMeshtasticPreset && sent.back().value=="LONG_TURBO","LongTurbo saves by stable preset code");
+  std::strcpy(model.meshtastic_preset,"LONG_TURBO");model.meshtastic_slots=52;
+  std::strcpy(model.profile,"US LongTurbo / 908.750 MHz");
+  focus=2;key(input::KeyCode::Select,model);key(input::KeyCode::Down,model);
+  for(int i=0;i<4;++i)key(input::KeyCode::Right,model);
+  expect(meshChoice==14 && screenHas("908.750 MHz / slot 14"),"slot keyboard offers increments of ten and one with RF preview");
+  capture(output,"mesh-slot",model);key(input::KeyCode::Select,model);
+  expect(sent.back().action==ui::Action::SaveMeshtasticSlot && sent.back().field==14,"manual frequency slot saves explicitly");
+  model.meshtastic_slot=14;const size_t slotCount=sent.size();key(input::KeyCode::Select,model);key(input::KeyCode::Right,model);key(input::KeyCode::Back,model);
+  expect(page==Page::MeshSettings && focus==2 && sent.size()==slotCount && model.meshtastic_slot==14,"Escape cancels staged slot edit without saving");
+  focus=3;key(input::KeyCode::Select,model);expect(ui::mesh_settings::count(meshField,model)==2,"Cardputer filters incompatible US-SOCAL MeshCore profile");
+  key(input::KeyCode::Down,model);capture(output,"mesh-meshcore",model);key(input::KeyCode::Select,model);
+  expect(sent.back().action==ui::Action::SaveMeshCoreProfile && sent.back().value=="US-NARROW","regional MeshCore profile saves by name");
+  focus=4;key(input::KeyCode::Select,model);for(int i=0;i<4;++i)key(input::KeyCode::Down,model);
+  capture(output,"mesh-dwell",model);key(input::KeyCode::Select,model);
+  expect(sent.back().action==ui::Action::SaveLoRaDwell && sent.back().field==600000,"combined dwell saves milliseconds");
+  focus=5;key(input::KeyCode::Select,model);key(input::KeyCode::Up,model);capture(output,"mesh-public-decoding",model);key(input::KeyCode::Select,model);
+  expect(sent.back().action==ui::Action::SavePublicDecode && sent.back().field==0,"public decoding can be disabled independently");
+  key(input::KeyCode::Back,model);expect(page==Page::Settings && focus==6,"mesh Back returns to its original Settings row");
+  std::strcpy(model.region,"EU_868");model.meshtastic_slot=0;model.meshtastic_slots=1;
+  meshField=ui::mesh_settings::Preset;meshChoice=1;show(Page::MeshChoice);
+  const size_t rejected=sent.size();key(input::KeyCode::Select,model);
+  expect(sent.size()==rejected && page==Page::MeshChoice && screenHas("Does not fit region"),"EU868 LongTurbo is visibly unavailable and cannot save");capture(output,"mesh-incompatible-region",model);
+  std::strcpy(model.region,"US");model.meshtastic_slots=52;meshChoice=8;
+  key(input::KeyCode::Select,model);expect(sent.size()==rejected,"Cardputer rejects ShortTurbo AUTO whose complete bandwidth exceeds U214 range");
+  model.meshtastic_slot=14;key(input::KeyCode::Select,model);
+  expect(sent.size()==rejected+1 && sent.back().value=="SHORT_TURBO","compatible manual slot permits the same modem preset without silent retuning");
+  model.meshtastic_slot=0;meshField=ui::mesh_settings::Slot;meshChoice=43;show(Page::MeshChoice);
+  const size_t invalidSlot=sent.size();key(input::KeyCode::Select,model);
+  expect(sent.size()==invalidSlot && screenHas("Outside radio band"),"LongTurbo slot 43 rejects occupied bandwidth above 923 MHz");
+  meshChoice=0;key(input::KeyCode::Up,model);expect(meshChoice==0,"slot decrements stop at AUTO");
+  meshChoice=52;key(input::KeyCode::Down,model);expect(meshChoice==52,"slot increments stop at region slot count");
+  for(unsigned guard=0;guard<4;++guard) {
+    model.running=guard==0;model.upload_busy=guard==1;model.sd=guard!=2;model.region_configured=guard!=3;
+    show(Page::MeshChoice);meshField=ui::mesh_settings::Protocol;meshChoice=1;const size_t old=sent.size();key(input::KeyCode::Select,model);
+    expect(sent.size()==old && page==Page::MeshChoice && screenHas(ui::mesh_settings::blockedReason(model)),"capture, upload, missing SD and unset region block changes with an explanation");
+  }
+  model.running=model.upload_busy=false;model.sd=model.region_configured=true;
+  std::strcpy(model.meshtastic_preset,"CUSTOM");model.meshtastic_slots=0;show(Page::MeshSettings);focus=1;capture(output,"mesh-custom",model);
+  expect(screenHas("Custom / SD"),"imported numeric radio configuration is identified as custom");
+  meshField=ui::mesh_settings::Slot;meshChoice=0;show(Page::MeshChoice);const size_t customCount=sent.size();key(input::KeyCode::Select,model);
+  expect(sent.size()==customCount && screenHas("Custom SD preset"),"custom numeric preset cannot receive an invalid named slot save");
+  std::strcpy(model.meshtastic_preset,"LONG_TURBO");model.meshtastic_slots=52;
+  show(Page::MeshSettings);focus=4;capture(output,"mesh-settings-more",model);
   show(Page::Settings);focus=5;key(input::KeyCode::Select,model);expect(page==Page::Power && focus==0,"Power defaults to Cancel");capture(output,"power",model);
   const size_t powerCount=sent.size();key(input::KeyCode::Select,model);expect(page==Page::Settings && sent.size()==powerCount,"Power Cancel emits no shutdown");
   focus=5;key(input::KeyCode::Select,model);key(input::KeyCode::Right,model);key(input::KeyCode::Select,model);expect(sent.back().action==ui::Action::Shutdown,"Power confirmation requests shutdown");
@@ -143,17 +193,25 @@ int main(int argc,char** argv) {
     if(command.text.find("Upload preference save failed")!=std::string::npos)noticeLine=command.y==110;}
   expect(statusLine&&noticeLine,"status and action notice occupy distinct nonoverlapping rows");capture(output,"uploads-status-notice",model);
   expect(!ui::allowsBackgroundUpload()&&ui::allowsUploadJobPolling(),"Uploads allows existing-job polling but suppresses new automatic uploads");
-  for(Page guarded:{Page::Credentials,Page::Edit,Page::Power}){show(guarded);expect(!ui::allowsBackgroundUpload()&&!ui::allowsUploadJobPolling(),"editing and Power suppress both network scheduling paths");}
+  for(Page guarded:{Page::Credentials,Page::Edit,Page::Power,Page::MeshSettings,Page::MeshChoice}){show(guarded);expect(!ui::allowsBackgroundUpload()&&!ui::allowsUploadJobPolling(),"editing and Power suppress both network scheduling paths");}
   show(Page::Settings);expect(ui::allowsBackgroundUpload()&&ui::allowsUploadJobPolling(),"normal idle page allows automatic work and job continuation");
   show(Page::Uploads);focus=6;hw::display().commands.clear();dirty=true;ui::tick(model);
   expect(screenHas("Cancel upload")&&screenHas("3/3"),"Cancel remains reachable on third Uploads page");
   key(input::KeyCode::Select,model);expect(sent.back().action==ui::Action::CancelUpload,"third-page cancel action preserved");
   // Every page/focus and long valid model string must remain within 240 x 135.
   model.shutting_down=false;memset(model.notice,'N',sizeof(model.notice)-1);memset(model.upload_status,'U',sizeof(model.upload_status)-1);
-  for(Page next:{Page::Home,Page::Drive,Page::Recon,Page::Detail,Page::Settings,Page::Credentials,Page::Edit,Page::Regions,Page::Power,Page::Uploads}) {
+  for(Page next:{Page::Home,Page::Drive,Page::Recon,Page::Detail,Page::Settings,Page::Credentials,Page::Edit,Page::Regions,Page::Power,Page::Uploads,Page::MeshSettings}) {
     show(next);const unsigned count=std::max(1U,menuCount());
     for(unsigned item=0;item<count;++item){focus=item;dirty=true;ui::tick(model);++assertions;}
   }
+  for(const char* region:{"US","EU_868","ANZ","JP","UNSET"}) {
+    std::strcpy(model.region,region);
+    for(meshField=0;meshField<ui::mesh_settings::FieldCount;++meshField) {
+      show(Page::MeshChoice);
+      for(meshChoice=0;meshChoice<ui::mesh_settings::count(meshField,model);++meshChoice) {dirty=true;ui::tick(model);++assertions;}
+    }
+  }
+  expect(hostAllocationCount==1 && hostAllocationBytes==32400,"mesh screens add no persistent or temporary UI heap allocation");
   show(Page::Home);ui::keyboard({input::KeyCode::Down,0},model);hostMillis+=45;ui::tick(model);
   expect(ui::inputLatencyMaxMs()>=45,"input latency includes queued time before draw");
   expect(latencyCount==64,"latency sample storage stays bounded after many key events");

@@ -4,6 +4,7 @@
 #include "recon.h"
 #include "version.h"
 #include "lora_profiles.h"
+#include "ui_mesh_settings.h"
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -24,10 +25,12 @@ constexpr uint16_t AMBER = 0xfd20, RED = 0xf9aa, BORDER = 0x1368;
 constexpr const char* fields[] = {"WiGLE API name", "WiGLE API token",
   "WDGWars token", "Wi-Fi SSID", "Wi-Fi password"};
 
-enum class Page { Home, Wardriver, Recon, ReconDetail, Settings, Credentials, Regions, Keyboard };
+enum class Page { Home, Wardriver, Recon, ReconDetail, Settings, Credentials, Regions, Keyboard, MeshSettings, MeshChoice };
 Page page = Page::Home, settingsParent = Page::Home;
 ui::Handler onAction = nullptr;
 int tab = 0, field = 0, keyPage = 0;
+unsigned meshField=0,meshChoice=0;
+constexpr unsigned MESH_CHOICES_PER_PAGE=4;
 uint8_t reconFilter = 0, reconPage = 0;
 int focusIndex = -1;
 bool focusVisible = false;
@@ -360,11 +363,59 @@ void settings(const ui::Model& m) {
   button(8,52,224,38,region,GREEN);
   button(8,102,224,38,"CONNECTION KEYS",CYAN);
   button(8,152,224,38,"POWER",AMBER);
-  const char* modes[]={"LORA: MESHTASTIC", "LORA: MESHCORE", "LORA: BOTH / SLOW SCAN"};
-  button(8,202,224,32,modes[m.lora_mode<=2?m.lora_mode:0],GREEN);
+  button(8,202,224,32,"MESH RADIO / DECODE SETTINGS",GREEN);
   if(m.notice[0]) wrapped(m.notice,12,246,sizeof(m.notice),AMBER);
   button(8,280,108,32,"< BACK",CYAN);
   button(124,280,108,32,"RETRY SD",GREEN);
+}
+
+void meshSettings(const ui::Model& m) {
+  heading("MESH RADIO / DECODE SETTINGS");
+  gfx().fillRect(0,47,FRAME_WIDTH,227,BG);
+  label(m.profile[0]?m.profile:"Choose a region in Settings",9,49,CYAN,1,37);
+  for(unsigned i=0;i<ui::mesh_settings::FieldCount;++i) {
+    char summary[37];ui::mesh_settings::summary(i,m,summary,sizeof(summary));
+    button(8,65+int(i)*30,224,27,summary,GREEN);
+  }
+  label(m.lora_mode==2?"One radio alternates; packets may miss":"Match the local mesh preset and slot",9,249,MUTED,1,37);
+  const char* blocked=ui::mesh_settings::blockedReason(m);
+  label(blocked[0]?blocked:m.notice[0]?m.notice:"Advanced channel keys: SD config.json",9,263,blocked[0]||m.notice[0]?AMBER:MUTED,1,37);
+  button(8,280,224,32,"< BACK",CYAN);
+}
+
+void meshChoices(const ui::Model& m) {
+  heading(ui::mesh_settings::fieldTitles[meshField]);
+  gfx().fillRect(0,47,FRAME_WIDTH,227,BG);
+  const auto choice=ui::mesh_settings::option(meshField,meshChoice,m);
+  const unsigned count=ui::mesh_settings::count(meshField,m);
+  char text[64];
+  if(meshField==ui::mesh_settings::Slot) {
+    button(8,66,224,38,choice.label,choice.available?GREEN:AMBER,true);
+    label(choice.detail,9,119,choice.available?GREEN:AMBER,1,37);
+    const char* controls[]={"-10","-1","+1","+10"};
+    for(unsigned i=0;i<4;++i)button(8+58*int(i),146,50,36,controls[i],CYAN);
+    snprintf(text,sizeof(text),"AUTO or 1-%u",unsigned(m.meshtastic_slots));
+    label(m.meshtastic_slots?text:"Custom SD preset: choose named preset",9,199,MUTED,1,37);
+    label("The complete bandwidth must fit.",9,215,MUTED,1,37);
+    label("Changes apply only when you Save.",9,240,MUTED,1,37);
+  } else {
+    const unsigned start=meshChoice/MESH_CHOICES_PER_PAGE*MESH_CHOICES_PER_PAGE;
+    for(unsigned row=0;row<MESH_CHOICES_PER_PAGE && start+row<count;++row) {
+      const auto candidate=ui::mesh_settings::option(meshField,start+row,m);
+      snprintf(text,sizeof(text),"%s%.31s",candidate.available?"":"[X] ",candidate.label);
+      button(8,66+int(row)*38,224,32,text,candidate.available?GREEN:MUTED,start+row==meshChoice);
+    }
+    label(choice.detail,9,222,choice.available?GREEN:AMBER,1,37);
+    if(count>MESH_CHOICES_PER_PAGE) {
+      button(8,240,55,25,"< PREV",CYAN);button(177,240,55,25,"NEXT >",CYAN);
+      snprintf(text,sizeof(text),"%u / %u",meshChoice/MESH_CHOICES_PER_PAGE+1,(count+MESH_CHOICES_PER_PAGE-1)/MESH_CHOICES_PER_PAGE);
+      label(text,99,247,MUTED,1,12);
+    }
+  }
+  const char* blocked=ui::mesh_settings::blockedReason(m);
+  label(blocked[0]?blocked:!choice.available?"Unavailable: adjust slot / preset":"Save applies; Back cancels",9,266,blocked[0]||!choice.available?AMBER:MUTED,1,37);
+  button(8,280,108,32,"< CANCEL",CYAN);
+  button(124,280,108,32,"SAVE",choice.available && ui::mesh_settings::editable(m)?GREEN:MUTED);
 }
 
 void credentials(const ui::Model& m) {
@@ -529,9 +580,30 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
     if(inside(x,y,8,52,224,38)) openRegions(m,false);
     else if(inside(x,y,8,102,224,38)) setPage(Page::Credentials);
     else if(inside(x,y,8,152,224,38)) { powerDialog=true; focusIndex=-1; }
-    else if(inside(x,y,8,202,224,32) && onAction)onAction(ui::Action::SaveLoRaMode,(m.lora_mode+1)%3,"");
+    else if(inside(x,y,8,202,224,32))setPage(Page::MeshSettings);
     else if(inside(x,y,8,280,108,32)) setPage(settingsParent);
     else if(inside(x,y,124,280,108,32) && onAction) onAction(ui::Action::RetryStorage,0,"");
+  } else if(page==Page::MeshSettings) {
+    for(unsigned i=0;i<ui::mesh_settings::FieldCount;++i)if(inside(x,y,8,65+int(i)*30,224,27)) {
+      meshField=i;meshChoice=ui::mesh_settings::selected(i,m);setPage(Page::MeshChoice);break;
+    }
+    if(inside(x,y,8,280,224,32))setPage(Page::Settings);
+  } else if(page==Page::MeshChoice) {
+    const unsigned count=ui::mesh_settings::count(meshField,m);
+    if(meshField==ui::mesh_settings::Slot) {
+      const int steps[]={-10,-1,1,10};
+      for(unsigned i=0;i<4;++i)if(inside(x,y,8+58*int(i),146,50,36))
+        meshChoice=unsigned(std::max(0,std::min(int(count)-1,int(meshChoice)+steps[i])));
+    } else {
+      const unsigned start=meshChoice/MESH_CHOICES_PER_PAGE*MESH_CHOICES_PER_PAGE;
+      for(unsigned row=0;row<MESH_CHOICES_PER_PAGE && start+row<count;++row)
+        if(inside(x,y,8,66+int(row)*38,224,32))meshChoice=start+row;
+      const unsigned pages=(count+MESH_CHOICES_PER_PAGE-1)/MESH_CHOICES_PER_PAGE;
+      if(pages>1 && inside(x,y,8,240,55,25)) {meshChoice=((meshChoice/MESH_CHOICES_PER_PAGE+pages-1)%pages)*MESH_CHOICES_PER_PAGE;focusIndex=-1;}
+      else if(pages>1 && inside(x,y,177,240,55,25)) {meshChoice=((meshChoice/MESH_CHOICES_PER_PAGE+1)%pages)*MESH_CHOICES_PER_PAGE;focusIndex=-1;}
+    }
+    if(inside(x,y,8,280,108,32)) {setPage(Page::MeshSettings);focusIndex=int(meshField);}
+    else if(inside(x,y,124,280,108,32) && ui::mesh_settings::save(meshField,meshChoice,m,onAction)) {setPage(Page::MeshSettings);focusIndex=int(meshField);}
   } else if (page == Page::Regions) {
     for(unsigned row=0;row<REGIONS_PER_PAGE;++row) {
       const unsigned i=regionPage*REGIONS_PER_PAGE+row;
@@ -577,6 +649,8 @@ void touchAction(uint16_t x, uint16_t y, const ui::Model& m) {
 void back() {
   if(powerDialog) { powerDialog=false; fullClearNeeded=true; dirty=true; return; }
   if (page == Page::Keyboard) { eraseInput(); setPage(Page::Credentials); }
+  else if(page==Page::MeshChoice) {setPage(Page::MeshSettings);focusIndex=int(meshField);}
+  else if(page==Page::MeshSettings) {setPage(Page::Settings);focusIndex=3;}
   else if(page==Page::Credentials) setPage(Page::Settings);
   else if(page==Page::Regions) setPage(regionOnboarding?Page::Home:Page::Settings);
   else if (page == Page::Settings) setPage(settingsParent);
@@ -616,6 +690,20 @@ size_t focusTargets(const ui::Model& m, Rect targets[MAX_TARGETS]) {
     add(8,52,224,38); add(8,102,224,38); add(8,152,224,38);
     add(8,202,224,32);
     add(8,280,108,32); add(124,280,108,32);
+  } else if(page==Page::MeshSettings) {
+    for(unsigned i=0;i<ui::mesh_settings::FieldCount;++i)add(8,65+int(i)*30,224,27);
+    add(8,280,224,32);
+  } else if(page==Page::MeshChoice) {
+    const unsigned choices=ui::mesh_settings::count(meshField,m);
+    if(meshField==ui::mesh_settings::Slot) {
+      for(unsigned i=0;i<4;++i)add(8+58*int(i),146,50,36);
+    } else {
+      const unsigned start=meshChoice/MESH_CHOICES_PER_PAGE*MESH_CHOICES_PER_PAGE;
+      for(unsigned row=0;row<MESH_CHOICES_PER_PAGE && start+row<choices;++row)add(8,66+int(row)*38,224,32);
+      if(choices>MESH_CHOICES_PER_PAGE) {add(8,240,55,25);add(177,240,55,25);}
+    }
+    add(8,280,108,32);
+    if(ui::mesh_settings::editable(m) && ui::mesh_settings::option(meshField,meshChoice,m).available)add(124,280,108,32);
   } else if (page == Page::Regions) {
     for(unsigned row=0;row<REGIONS_PER_PAGE;++row) {
       const unsigned i=regionPage*REGIONS_PER_PAGE+row;
@@ -659,7 +747,7 @@ void keyboard(const input::KeyEvent&, const Model&) {}
 uint32_t inputLatencyP95Ms() { return 0; }
 uint32_t inputLatencyMaxMs() { return 0; }
 uint32_t inputLatencySamples() { return 0; }
-bool allowsBackgroundUpload() { return page != Page::Keyboard; }
+bool allowsBackgroundUpload() { return page != Page::Keyboard && page != Page::MeshSettings && page != Page::MeshChoice; }
 bool allowsUploadJobPolling() { return allowsBackgroundUpload(); }
 void begin(Handler handler) {
   onAction = handler;
@@ -669,6 +757,7 @@ void begin(Handler handler) {
   page = Page::Home; settingsParent = Page::Home;
   powerDialog=false; onboardingShown=false; regionOnboarding=false;
   tab = 0; reconFilter = 0; reconPage = 0;
+  meshField=meshChoice=0;
   focusIndex = -1; focusVisible = false;
   previousFocusDrawn = false;
   eraseInput();
@@ -770,6 +859,8 @@ void tick(const Model& model) {
   else if (page == Page::Recon) recon(model);
   else if (page == Page::ReconDetail) reconDetail();
   else if (page == Page::Settings) settings(model);
+  else if (page == Page::MeshSettings) meshSettings(model);
+  else if (page == Page::MeshChoice) meshChoices(model);
   else if (page == Page::Credentials) credentials(model);
   else if (page == Page::Regions) regions(model);
   else drawKeyboard();

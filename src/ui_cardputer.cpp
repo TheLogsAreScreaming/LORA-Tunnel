@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "hardware.h"
 #include "lora_profiles.h"
+#include "ui_mesh_settings.h"
 #include "version.h"
 #include "credential_validation.h"
 #include "cardputer_logo_pixels.h"
@@ -20,7 +21,7 @@ constexpr const char* fields[]={"WiGLE API name","WiGLE API token","WDGWars toke
   "Home Wi-Fi SSID","Home Wi-Fi password","Wardrift API token"};
 constexpr const char* categories[]={"ALL","ALPR","FLOCK","BODYCAM","IBEACON","RING",
   "CAMERAS","DRONES","FIND MY","TRACKERS","GLASSES","ACOUSTIC","SERIAL","RADIO TOOLS","CUSTOM"};
-enum class Page { Home, Drive, Recon, Detail, Settings, Credentials, Edit, Regions, Power, Uploads };
+enum class Page { Home, Drive, Recon, Detail, Settings, Credentials, Edit, Regions, Power, Uploads, MeshSettings, MeshChoice };
 Page page=Page::Home, settingsParent=Page::Home;
 ui::Handler handler=nullptr;
 lgfx::LGFX_Sprite canvas;
@@ -37,6 +38,7 @@ uint32_t latencyTotal=0;
 unsigned latencyCount=0, latencyNext=0;
 bool inputPending=false;
 unsigned focus=0, tab=0, filter=0, selectedMatch=0, editField=0;
+unsigned meshField=0, meshChoice=0;
 int regionIndex=0;
 char inputValue[128]{};
 char editError[64]{};
@@ -108,6 +110,8 @@ void openRegions(const ui::Model& m,bool first) {
   show(Page::Regions);
 }
 void back(const ui::Model& m) {
+  if(page==Page::MeshChoice) { show(Page::MeshSettings);focus=meshField;return; }
+  if(page==Page::MeshSettings) { show(Page::Settings);focus=6;return; }
   if(page==Page::Power) { show(Page::Settings); return; }
   if(page==Page::Edit) { eraseInput(); show(Page::Credentials); return; }
   if(page==Page::Credentials || page==Page::Uploads) { show(Page::Settings); return; }
@@ -122,6 +126,7 @@ void back(const ui::Model& m) {
 unsigned menuCount() {
   if(page==Page::Home)return 3;
   if(page==Page::Settings)return 7;
+  if(page==Page::MeshSettings)return ui::mesh_settings::FieldCount;
   if(page==Page::Credentials)return sizeof(fields)/sizeof(fields[0]);
   if(page==Page::Uploads)return 7;
   if(page==Page::Power)return 2;
@@ -137,7 +142,11 @@ void select(const ui::Model& m) {
     else if(focus==3)emit(ui::Action::ToggleAlerts,m.recon_alerts?0:1);
     else if(focus==4)emit(ui::Action::RetryStorage);
     else if(focus==5)show(Page::Power);
-    else emit(ui::Action::SaveLoRaMode,(m.lora_mode+1)%3);
+    else show(Page::MeshSettings);
+  } else if(page==Page::MeshSettings) {
+    meshField=focus;meshChoice=ui::mesh_settings::selected(meshField,m);show(Page::MeshChoice);
+  } else if(page==Page::MeshChoice) {
+    if(ui::mesh_settings::save(meshField,meshChoice,m,handler)) {show(Page::MeshSettings);focus=meshField;}
   } else if(page==Page::Credentials) {
     editField=focus; eraseInput(); editError[0]=0; show(Page::Edit);
   } else if(page==Page::Edit) {
@@ -171,7 +180,12 @@ void select(const ui::Model& m) {
   } else if(page==Page::Detail)show(Page::Recon);
 }
 void move(int delta,const ui::Model& m) {
-  if(page==Page::Regions) {
+  if(page==Page::MeshChoice) {
+    const int count=int(ui::mesh_settings::count(meshField,m));
+    if(count)meshChoice=meshField==ui::mesh_settings::Slot?
+      unsigned(std::max(0,std::min(count-1,int(meshChoice)+delta))):
+      unsigned((int(meshChoice)+count+delta)%count);
+  } else if(page==Page::Regions) {
     const int count=int(tunnel::lora_profiles::profileCount);
     regionIndex=(regionIndex+delta+count)%count;
   } else if(page==Page::Recon) {
@@ -237,9 +251,39 @@ void render(const ui::Model& m) {
   } else if(page==Page::Settings) {
     header("SETTINGS"); status(m);
     char alert[40];snprintf(alert,sizeof(alert),"Alert sound: %s",m.recon_alerts?"ON":"OFF");
-    const char* mode=m.lora_mode==2?"LoRa: BOTH / slow scan":m.lora_mode==1?"LoRa: MESHCORE":"LoRa: MESHTASTIC";
-    const char* names[]={"LoRa region","Connection keys", "Automatic uploads",alert,"Retry SD card","Power / save + sleep",mode};
+    const char* names[]={"LoRa region","Connection keys", "Automatic uploads",alert,"Retry SD card","Power / save + sleep","Mesh radio / decode settings"};
     drawMenu(names,7); footer("Up/Down choose  Enter open  Esc back",m);
+  } else if(page==Page::MeshSettings) {
+    header("MESH CFG");
+    label(m.profile[0]?m.profile:"Choose a region in Settings",4,26,CYAN,38);
+    char names[ui::mesh_settings::FieldCount][48];const char* rows[ui::mesh_settings::FieldCount];
+    for(unsigned i=0;i<ui::mesh_settings::FieldCount;++i) {ui::mesh_settings::summary(i,m,names[i],sizeof(names[i]));rows[i]=names[i];}
+    drawMenu(rows,ui::mesh_settings::FieldCount,3);
+    label(m.lora_mode==2?"One radio alternates; packets may miss":"Match the local mesh preset and slot",4,96,MUTED,38);
+    const char* blocked=ui::mesh_settings::blockedReason(m);
+    label(blocked[0]?blocked:m.notice[0]?m.notice:"Advanced channel keys: SD config.json",4,110,blocked[0]||m.notice[0]?AMBER:MUTED,38);
+    footer("Up/Down choose  Enter edit  Esc back",m,false);
+  } else if(page==Page::MeshChoice) {
+    header("MESH EDIT");label(ui::mesh_settings::fieldTitles[meshField],4,26,CYAN,38);
+    const auto choice=ui::mesh_settings::option(meshField,meshChoice,m);
+    if(meshField==ui::mesh_settings::Slot) {
+      row(46,choice.label,true,choice.available?WHITE:MUTED);
+      label(choice.detail,4,72,choice.available?GREEN:AMBER,38);
+      snprintf(text,sizeof(text),"AUTO or 1-%u; occupied band checked",unsigned(m.meshtastic_slots));
+      label(m.meshtastic_slots?text:"Custom SD preset: choose named preset",4,89,MUTED,38);
+    } else {
+      const unsigned start=meshChoice/3*3,count=ui::mesh_settings::count(meshField,m);
+      snprintf(text,sizeof(text),"%u/%u",meshChoice+1,count);label(text,193,26,MUTED,7);
+      for(unsigned i=0;i<3 && start+i<count;++i) {
+        const auto candidate=ui::mesh_settings::option(meshField,start+i,m);
+        snprintf(text,sizeof(text),"%s%s",candidate.available?"":"[X] ",candidate.label);
+        row(40+int(i)*18,text,meshChoice==start+i,candidate.available?WHITE:MUTED);
+      }
+      label(choice.detail,4,98,choice.available?GREEN:AMBER,38);
+    }
+    const char* blocked=ui::mesh_settings::blockedReason(m);
+    label(blocked[0]?blocked:!choice.available?"Unavailable: adjust slot / preset":"Enter saves once; Escape cancels",4,110,blocked[0]||!choice.available?AMBER:MUTED,38);
+    footer(meshField==ui::mesh_settings::Slot?"<> 1  Up/Down 10  Enter save  Esc back":"Up/Down choose  Enter save  Esc back",m,false);
   } else if(page==Page::Credentials) {
     header("KEYS"); label("Enter a replacement; saved on SD.",4,26,MUTED,38);
     drawMenu(fields,sizeof(fields)/sizeof(fields[0])); footer("Up/Down choose  Enter edit  Esc back",m);
@@ -302,6 +346,7 @@ void begin(Handler onAction) {
   if(scratchMemory)return;
   uiTask=xTaskGetCurrentTaskHandle();
   handler=onAction;page=settingsParent=Page::Home;focus=tab=filter=selectedMatch=editField=0;
+  meshField=meshChoice=0;
   dirty=true;splashShown=onboarded=false;regionOnboarding=false;eraseInput();
   inputPending=false;inputMaximum=latencyCount=latencyNext=latencyTotal=0;
   if(!pixels)pixels=heap_caps_malloc(WIDTH*HEIGHT,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
@@ -359,7 +404,10 @@ void keyboard(const input::KeyEvent& event,const Model& model) {
   if(code==KeyCode::Back)back(model);
   else if(code==KeyCode::Select)select(model);
   else if(code==KeyCode::Backspace && page==Page::Edit) {if(inputLength)inputValue[--inputLength]=0;}
-  else if(code==KeyCode::Up || code==KeyCode::Down)move(code==KeyCode::Up?-1:1,model);
+  else if(code==KeyCode::Up || code==KeyCode::Down) {
+    const int step=page==Page::MeshChoice && meshField==mesh_settings::Slot?10:1;
+    move(code==KeyCode::Up?-step:step,model);
+  }
   else if(code==KeyCode::Left || code==KeyCode::Right) {
     const int delta=code==KeyCode::Left?-1:1;
     if(page==Page::Drive)tab=(tab+3+delta)%3;
@@ -376,8 +424,8 @@ uint32_t inputLatencyP95Ms() {
 }
 uint32_t inputLatencyMaxMs() {return inputMaximum;}
 uint32_t inputLatencySamples() {return latencyTotal;}
-bool allowsBackgroundUpload() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Uploads && page!=Page::Power;}
-bool allowsUploadJobPolling() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Power;}
+bool allowsBackgroundUpload() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Uploads && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
+bool allowsUploadJobPolling() {return !scratchMemory && page!=Page::Edit && page!=Page::Credentials && page!=Page::Power && page!=Page::MeshSettings && page!=Page::MeshChoice;}
 void tick(const Model& model) {
   if(scratchMemory)return;
   if(!splashShown) {splash();present();splashShown=true;splashAt=millis();return;}

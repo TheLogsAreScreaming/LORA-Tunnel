@@ -17,6 +17,10 @@ struct Model {
   char recent[3][4][48]{};
   char gps_detail[48]{};
   uint8_t lora_mode=0;
+  char meshtastic_preset[20]="LONG_FAST", meshcore_profile[32]="AUTO";
+  uint16_t meshtastic_slot=0, meshtastic_slots=0;
+  uint32_t lora_dwell_ms=30000;
+  bool decode_public=true;
   uint32_t mesh_decoded=0, mesh_unknown=0;
   char lora_detail[48]{}, mesh_recent_detail[4][64]{};
   // Latest matched summaries only; Category/Confidence use tunnel::recon enums.
@@ -25,7 +29,8 @@ struct Model {
   bool upload_busy = false, auto_wigle = false, auto_wardrift = false, auto_wdgwars = false;
   char upload_status[64]{};
 };
-enum class Action { ToggleSession, ToggleMode, SaveCredential, RetryStorage, ToggleAlerts, SaveRegion, Shutdown, ToggleAutoUpload, UploadNow, CancelUpload, SaveLoRaMode };
+enum class Action { ToggleSession, ToggleMode, SaveCredential, RetryStorage, ToggleAlerts, SaveRegion, Shutdown, ToggleAutoUpload, UploadNow, CancelUpload, SaveLoRaMode,
+  SaveMeshtasticPreset, SaveMeshtasticSlot, SaveMeshCoreProfile, SaveLoRaDwell, SavePublicDecode };
 // Handler executes synchronously, sometimes while UI owns SPI. Copy text to a
 // bounded action queue immediately; do not access SD, radio, or draw here.
 using Handler = void (*)(Action, int, const char*);

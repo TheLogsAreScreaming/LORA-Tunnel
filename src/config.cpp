@@ -106,9 +106,6 @@ bool read(JsonDocument& document,const char* filename,void* buffer) {
   if(error==DeserializationError::NoMemory) {configAllocationFailed=true;return false;}
   return !error && parseConfigRadio(document.as<JsonVariantConst>(),radioSettings);
 }
-void copy(char* target, size_t size, JsonVariantConst v) {
-  if (v.is<const char*>()) strlcpy(target, v.as<const char*>(), size);
-}
 bool copyCredential(char* target, int field, JsonVariantConst value) {
   // Never turn malformed imported credentials into a different, truncated key
   // or SSID. Keep the source document intact so it can be corrected on SD.
@@ -125,6 +122,21 @@ uint32_t boundedSetting(JsonVariantConst value, uint32_t fallback, uint32_t mini
   const uint32_t parsed=value.as<uint32_t>();
   return parsed>=minimum && parsed<=maximum ? parsed : fallback;
 }
+void applyRadioSettings() {
+  selectionMade=radioSettings.selection_complete;
+  hardwareCompatible=radioSettings.hardware_compatible;
+  config.lora_enabled=radioSettings.enabled;
+  strlcpy(config.region,radioSettings.region,sizeof(config.region));
+  config.frequency=radioSettings.frequency;config.bandwidth=radioSettings.bandwidth;
+  config.sf=radioSettings.sf;config.cr=radioSettings.cr;config.preamble=radioSettings.preamble;
+  config.lora_mode=radioSettings.mode;
+  strcpy(config.meshtastic_preset,radioSettings.meshtastic_preset);
+  config.meshtastic_slot=radioSettings.meshtastic_slot;
+  strcpy(config.meshcore_profile,radioSettings.meshcore_profile);
+  config.lora_dwell_ms=radioSettings.dwell_ms;
+  const auto* modem=lora_profiles::findModemPreset(config.meshtastic_preset);
+  snprintf(config.profile,sizeof(config.profile),"%s %s",config.region,modem?modem->name:"Custom");
+}
 void applyRegion(const char* code) {
   const auto* profile=lora_profiles::find(code);
   strlcpy(config.region,code,sizeof(config.region));
@@ -136,6 +148,7 @@ void applyRegion(const char* code) {
   config.sf=profile ? profile->sf : 11;
   config.cr=profile ? profile->cr : 5;
   config.preamble=profile ? profile->preamble : 16;
+  strcpy(config.meshtastic_preset,"LONG_FAST");config.meshtastic_slot=0;
   strcpy(config.meshcore_profile,"AUTO");
   if(!lora_scan::meshCoreProfile(code,"AUTO"))config.lora_mode=0;
   if(profile) snprintf(config.profile,sizeof(config.profile),"%s LongFast",code);
@@ -165,6 +178,8 @@ void seedDocument(JsonDocument& document) {
   document["lora"]["preamble_symbols"]=config.preamble;
   document["lora"]["lna"]=config.lna;
   document["lora"]["mode"]=loraModeName(config.lora_mode);
+  document["lora"]["meshtastic_preset"]=config.meshtastic_preset;
+  document["lora"]["meshtastic_slot"]=config.meshtastic_slot;
   document["lora"]["dwell_ms"]=config.lora_dwell_ms;
   document["lora"]["meshcore_profile"]=config.meshcore_profile;
   document["lora"]["decode_public"]=config.decode_public;
@@ -189,12 +204,15 @@ bool prepareSave(JsonDocument& document,void* buffer) {
   if(sourceOpenFailed || configAllocationFailed) return false;
   if(!mainValid && !read(document,backupPath,buffer)) {
     if(sourceOpenFailed || configAllocationFailed) return false;
+    // Runtime keys omit their display names. Do not silently drop either key
+    // list if the original SD documents disappear after a successful load.
+    if(config.mesh_key_count || config.meshcore_key_count) {sourceOpenFailed=true;return false;}
     seedDocument(document);
   }
   return mainValid;
 }
 bool commitPrepared(JsonDocument& document,bool mainValid,const char* key,const char* value,const char* region,
-                    const char* upload=nullptr,bool uploadEnabled=false,void* buffer=nullptr) {
+                    const char* upload=nullptr,bool uploadEnabled=false,void* buffer=nullptr,bool applyMesh=false) {
   const auto fail=[&document]() {
     document.clear();
     if(exists(tempPath))removeFile(tempPath);
@@ -227,13 +245,18 @@ bool commitPrepared(JsonDocument& document,bool mainValid,const char* key,const 
     if(!renameFile(path,backupPath))return fail();
   } else if(exists(path) && (sourceOpenFailed || !removeFile(path)))return fail();
   if(!renameFile(tempPath,path))return fail();
+  if(applyMesh) {
+    applyRadioSettings();
+    parseMeshKeys(document["lora"],config.mesh_keys,config.mesh_key_count,config.decode_public);
+    parseMeshCoreKeys(document["lora"],config.meshcore_keys,config.meshcore_key_count);
+  }
   document.clear();
   return true;
 }
 }
 bool regionConfigured() {
   const auto* profile=lora_profiles::find(config.region);
-  return profile && lora_profiles::selectable(*profile);
+  return profile && profile->high_band_compatible && hardwareCompatible;
 }
 bool regionSelectionMade() { return selectionMade; }
 bool regionHardwareCompatible() { return hardwareCompatible; }
@@ -276,27 +299,14 @@ bool loadConfig() {
   else if(!loaded) loadRegionPreference();
   if (loaded) {
     configLoadState=primary ? ConfigLoadState::Primary : ConfigLoadState::Backup;
-    selectionMade=radioSettings.selection_complete;
-    hardwareCompatible=radioSettings.hardware_compatible;
+    applyRadioSettings();
     auto radio = document["lora"];
     config.lna = radio["lna"] | false;
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
     config.lna=false; // U214 has no selectable Heltec FEM/LNA.
 #endif
-    strlcpy(config.region,radioSettings.region,sizeof(config.region));
-    if(regionConfigured()) snprintf(config.profile,sizeof(config.profile),"%s LongFast",config.region);
-    copy(config.profile, sizeof(config.profile), radio["name"]);
-    // read() already validated the full radio settings before selecting this file.
-    config.lora_enabled = radioSettings.enabled;
-    config.frequency = static_cast<float>(radioSettings.frequency);
-    config.bandwidth = static_cast<float>(radioSettings.bandwidth);
-    config.sf = static_cast<uint8_t>(radioSettings.sf);
-    config.cr = static_cast<uint8_t>(radioSettings.cr);
-    config.preamble = static_cast<uint16_t>(radioSettings.preamble);
-    config.lora_mode=radioSettings.mode;
-    config.lora_dwell_ms=radioSettings.dwell_ms;
-    strcpy(config.meshcore_profile,radioSettings.meshcore_profile);
     parseMeshKeys(radio,config.mesh_keys,config.mesh_key_count,config.decode_public);
+    parseMeshCoreKeys(radio,config.meshcore_keys,config.meshcore_key_count);
     const auto preferences=parseReconPreferences(document.as<JsonVariantConst>());
     config.buttons_enabled=preferences.buttons_enabled;
     config.buzzer=preferences.buzzer;
@@ -392,11 +402,43 @@ bool saveLoRaMode(uint8_t mode) {
   if(document.capacity()<documentCapacity) {configAllocationFailed=true;return false;}
   const bool mainValid=prepareSave(document,operation.fileBuffer());
   document["lora"]["mode"]=loraModeName(mode);
-  if(!commitPrepared(document,mainValid,nullptr,nullptr,nullptr,nullptr,false,operation.fileBuffer()))return false;
+  if(!commitPrepared(document,mainValid,nullptr,nullptr,nullptr,nullptr,false,operation.fileBuffer(),true))return false;
   // commitPrepared readback validates the full radio section before rotation.
-  config.lora_mode=mode;
+  configLoadState=ConfigLoadState::Primary;
   return true;
 }
+namespace {
+enum class MeshSetting { Preset, Slot, MeshCore, Dwell, PublicDecode };
+bool saveMeshSetting(MeshSetting setting,const char* text,uint32_t value) {
+  configAllocationFailed=false;sourceOpenFailed=false;
+  ScopedConfigDocument operation;
+  auto& document=operation.document;
+  if(document.capacity()<documentCapacity) {configAllocationFailed=true;return false;}
+  const bool mainValid=prepareSave(document,operation.fileBuffer());
+  auto radio=document["lora"];
+  if(setting==MeshSetting::Preset || setting==MeshSetting::Slot) {
+    if(!setConfigDocumentMeshtastic(document.as<JsonVariant>(),
+        setting==MeshSetting::Preset?text:config.meshtastic_preset,
+        setting==MeshSetting::Slot?uint16_t(value):config.meshtastic_slot))return false;
+  } else if(setting==MeshSetting::MeshCore) {
+    if(!lora_scan::meshCoreProfile(config.region,text))return false;
+    radio["meshcore_profile"]=text;
+  } else if(setting==MeshSetting::Dwell) {
+    if(!lora_scan::validDwell(value))return false;
+    radio["dwell_ms"]=value;
+  } else radio["decode_public"]=value!=0;
+  if(!commitPrepared(document,mainValid,nullptr,nullptr,nullptr,nullptr,false,operation.fileBuffer(),true))return false;
+  // commitPrepared's readback supplies the exact persisted settings. Keep live
+  // state unchanged on any write/flush/rename failure.
+  configLoadState=ConfigLoadState::Primary;
+  return true;
+}
+}
+bool saveMeshtasticPreset(const char* code) {return saveMeshSetting(MeshSetting::Preset,code,0);}
+bool saveMeshtasticSlot(uint16_t slot) {return saveMeshSetting(MeshSetting::Slot,nullptr,slot);}
+bool saveMeshCoreProfile(const char* name) {return saveMeshSetting(MeshSetting::MeshCore,name,0);}
+bool saveLoRaDwell(uint32_t milliseconds) {return saveMeshSetting(MeshSetting::Dwell,nullptr,milliseconds);}
+bool savePublicDecode(bool enabled) {return saveMeshSetting(MeshSetting::PublicDecode,nullptr,enabled);}
 RegionSaveResult saveLoRaRegion(const char* code,bool sdMounted) {
   configAllocationFailed=false; sourceOpenFailed=false;
   RegionSaveResult result;

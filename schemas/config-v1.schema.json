@@ -17,19 +17,23 @@
         "selection_complete": {"type": "boolean", "default": false, "description": "An explicit Skip saves true with region UNSET, completing first setup while leaving LoRa disabled. Supported named regions and valid legacy US configurations also count as a completed choice."},
         "region": {"enum": ["UNSET", "US", "EU_868", "ANZ", "CN", "JP", "KR", "TW", "RU", "IN", "NZ_865", "TH", "UA_868", "MY_919", "SG_923", "PH_868", "PH_915", "KZ_863", "NP_865", "BR_902", "EU_433", "ANZ_433", "UA_433", "MY_433", "PH_433", "KZ_433"], "default": "UNSET", "description": "Omitted on legacy schema-1 files: enabled or explicit-frequency configs retain previous US settings; a bare disabled config remains UNSET. 433/470 MHz profiles require other hardware. Firmware validates occupied bandwidth against the target: Heltec 863-928 MHz or Cardputer U214 868-923 MHz."},
         "name": {"type": "string", "maxLength": 39, "description": "Firmware limit is 39 UTF-8 bytes, not arbitrary Unicode characters."},
-        "frequency_mhz": {"type": "number", "anyOf": [{"const": 0}, {"minimum": 433, "maximum": 928}], "description": "UNSET uses zero. A named region defaults to its LongFast center when omitted; firmware also requires the full selected bandwidth to fit that region. Legacy configs without region remain limited to 902-928 MHz."},
+        "frequency_mhz": {"type": "number", "anyOf": [{"const": 0}, {"minimum": 433, "maximum": 928}], "description": "UNSET uses zero. Omitted values derive from the named preset/slot, or LongFast for older configurations. Explicit raw radio fields must agree with a named preset; use CUSTOM for literal settings. Firmware requires the full occupied bandwidth to fit the region and target hardware. Legacy configs without region remain limited to the US 902-928 MHz band."},
         "bandwidth_khz": {"enum": [62.5, 125, 250, 500], "default": 250},
         "spreading_factor": {"type": "integer", "minimum": 7, "maximum": 12, "default": 11},
         "coding_rate_denominator": {"type": "integer", "minimum": 5, "maximum": 8, "default": 5},
         "preamble_symbols": {"type": "integer", "minimum": 8, "maximum": 64, "default": 16},
+        "meshtastic_preset": {"enum": ["LONG_FAST", "LONG_TURBO", "LONG_MODERATE", "LONG_SLOW", "MEDIUM_FAST", "MEDIUM_SLOW", "SHORT_FAST", "SHORT_SLOW", "SHORT_TURBO", "CUSTOM"], "default": "LONG_FAST", "description": "Named receive modem preset, with frequency derived from region and slot. LONG_TURBO is 500 kHz/SF11/CR4/8; a region too narrow for a preset rejects it without silently retuning. CUSTOM preserves literal raw radio fields. Older custom files without this field are inferred as CUSTOM. Firmware validates consistency with any explicit raw fields."},
+        "meshtastic_slot": {"type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Zero chooses the named preset's default-channel slot; positive values are one-based slots. Firmware rejects slots exceeding the region/preset slot count. CUSTOM only accepts zero. LongTurbo defaults to slot 14 in US and ANZ; slot 20 is the LongFast default in those regions."},
         "mode": {"enum": ["meshtastic", "meshcore", "combined"], "default": "meshtastic", "description": "Wardriver LoRa reception mode. Combined alternates one selected Meshtastic profile and one selected MeshCore profile; it does not receive both simultaneously."},
         "dwell_ms": {"type": "integer", "minimum": 30000, "maximum": 600000, "default": 30000, "description": "Minimum listen interval per profile in combined mode. In-progress packet handling can extend this interval; the opposite profile is not monitored during it."},
         "meshcore_profile": {"type": "string", "minLength": 1, "maxLength": 31, "pattern": "^[^\\u0000]*$", "default": "AUTO", "description": "AUTO chooses the first available preset for the selected region. Supported explicit names are listed in docs/COMBINED_MESH.md. Active MeshCore/combined mode requires a preset belonging to the region. The target hardware band is validated separately."},
-        "decode_public": {"type": "boolean", "default": true, "description": "Attempt the published Meshtastic default AES-CTR key. Disabling this does not remove explicitly configured keys or disable public MeshCore advert parsing."},
+        "decode_public": {"type": "boolean", "default": true, "description": "Attempt the published Meshtastic default AES-CTR key and MeshCore Public group key. Disabling this does not remove explicitly configured keys for either protocol or disable public MeshCore advert parsing."},
         "meshtastic_keys": {"type": "array", "maxItems": 4, "default": [], "items": {"$ref": "#/$defs/mesh_key"}, "description": "Private local channel keys. These are not WiGLE/WDGWars credentials. The firmware computes the eight-bit channel hash from each exact channel name and key. Keys never belong in observation logs or published configuration."},
+        "meshcore_keys": {"type": "array", "maxItems": 4, "default": [], "items": {"$ref": "#/$defs/meshcore_key"}, "description": "Private MeshCore group keys, separate from Meshtastic and upload credentials. The group hash is the first byte of SHA256 of the original 16-byte or 32-byte key; its local descriptive name does not affect reception. Keys never belong in observation logs or published configuration."},
         "lna": {"type": "boolean", "default": false}
       },
       "allOf": [
+        {"if": {"required": ["meshtastic_preset"], "properties": {"meshtastic_preset": {"const": "CUSTOM"}}}, "then": {"properties": {"meshtastic_slot": {"const": 0}}}},
         {"if": {"required": ["region"], "properties": {"region": {"const": "UNSET"}}}, "then": {"properties": {"enabled": {"const": false}, "frequency_mhz": {"const": 0}}}},
         {"if": {"required": ["region"], "properties": {"region": {"enum": ["CN", "EU_433", "ANZ_433", "UA_433", "MY_433", "PH_433", "KZ_433"]}}}, "then": {"properties": {"enabled": {"const": false}}}},
         {"if": {"not": {"required": ["region"]}}, "then": {"properties": {"frequency_mhz": {"minimum": 902, "maximum": 928}}}}
@@ -90,6 +94,13 @@
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 39, "pattern": "^[^\\u0000]*$", "description": "Exact channel name, case-sensitive; firmware limit is 39 UTF-8 bytes. A modem preset name is not necessarily the channel name."},
         "key_hex": {"type": "string", "pattern": "^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})?$", "writeOnly": true, "description": "Expanded 16-byte or 32-byte AES key as hexadecimal. Empty string explicitly selects plaintext for this named channel. Base64 shortcuts such as AQ== are not accepted here; decode_public already covers the ordinary published default key."}
+      }
+    },
+    "meshcore_key": {
+      "type": "object", "additionalProperties": true, "required": ["name", "key_hex"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 39, "pattern": "^[^\\u0000]*$", "description": "Local descriptive label; firmware limit is 39 UTF-8 bytes. It is not included in the MeshCore group hash and does not identify a sender."},
+        "key_hex": {"type": "string", "pattern": "^([0-9a-fA-F]{32}|[0-9a-fA-F]{64})$", "writeOnly": true, "description": "Expanded 16-byte or 32-byte MeshCore group key as hexadecimal. Empty/plaintext and Base64 shortcuts are not accepted. decode_public already covers the published Public group key."}
       }
     },
     "credential": {"type": "string", "maxLength": 127, "pattern": "^[^\\u0000]*$", "writeOnly": true, "description": "Firmware capacity is 127 UTF-8 bytes plus NUL, not 127 arbitrary Unicode characters. Empty string means unconfigured."}

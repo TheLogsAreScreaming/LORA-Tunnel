@@ -19,6 +19,8 @@ struct RadioSettings {
   char region[12] = "UNSET";
   uint8_t mode=0;
   uint32_t dwell_ms=30000;
+  char meshtastic_preset[20]="LONG_FAST";
+  uint16_t meshtastic_slot=0;
   char meshcore_profile[32]="AUTO";
 };
 
@@ -46,6 +48,19 @@ inline bool parseConfigRadio(JsonVariantConst root, RadioSettings& result) {
     return radio[key].as<std::int64_t>();
   };
   RadioSettings parsed;
+  const bool namedPreset=radio.containsKey("meshtastic_preset") || radio.containsKey("meshtastic_slot");
+  if(radio.containsKey("meshtastic_preset")) {
+    if(!radio["meshtastic_preset"].is<const char*>())return false;
+    const JsonString code=radio["meshtastic_preset"].as<JsonString>();
+    if(!code.size() || code.size()>=sizeof(parsed.meshtastic_preset) || strlen(code.c_str())!=code.size() ||
+       (!lora_profiles::findModemPreset(code.c_str()) && strcmp(code.c_str(),"CUSTOM")))return false;
+    strcpy(parsed.meshtastic_preset,code.c_str());
+  }
+  if(radio.containsKey("meshtastic_slot")) {
+    if(!radio["meshtastic_slot"].is<uint16_t>())return false;
+    parsed.meshtastic_slot=radio["meshtastic_slot"];
+  }
+  if(!strcmp(parsed.meshtastic_preset,"CUSTOM") && parsed.meshtastic_slot)return false;
   if(radio.containsKey("mode")) {
     if(!radio["mode"].is<const char*>())return false;
     const char* mode=radio["mode"];
@@ -67,6 +82,7 @@ inline bool parseConfigRadio(JsonVariantConst root, RadioSettings& result) {
   }
   uint8_t keyCount=0; bool publicDefault=true;
   if(!parseMeshKeys(radio,nullptr,keyCount,publicDefault))return false;
+  if(!parseMeshCoreKeys(radio,nullptr,keyCount))return false;
   parsed.enabled = radio["enabled"].as<bool>();
   const bool legacy=!radio.containsKey("region");
   const lora_profiles::Profile* profile=nullptr;
@@ -88,19 +104,34 @@ inline bool parseConfigRadio(JsonVariantConst root, RadioSettings& result) {
     parsed.bandwidth=profile->bandwidth_khz;
     parsed.sf=profile->sf; parsed.cr=profile->cr; parsed.preamble=profile->preamble;
   }
+  lora_profiles::Profile selected{};
+  const bool presetDerived=namedPreset && strcmp(parsed.meshtastic_preset,"CUSTOM");
+  if(presetDerived && profile) {
+    if(!lora_profiles::makeProfile(parsed.region,parsed.meshtastic_preset,parsed.meshtastic_slot,selected))return false;
+    parsed.frequency=selected.frequency_mhz;parsed.bandwidth=selected.bandwidth_khz;
+    parsed.sf=selected.sf;parsed.cr=selected.cr;parsed.preamble=selected.preamble;
+  }
   parsed.frequency = number("frequency_mhz", parsed.frequency);
   parsed.bandwidth = number("bandwidth_khz", parsed.bandwidth);
   parsed.sf = integer("spreading_factor", parsed.sf);
   parsed.cr = integer("coding_rate_denominator", parsed.cr);
   parsed.preamble = integer("preamble_symbols", parsed.preamble);
+  // An explicit preset and raw settings must describe the same radio. Legacy
+  // custom imports remain literal and are displayed as CUSTOM, never retuned.
+  if(presetDerived && profile &&
+     (std::fabs(parsed.frequency-selected.frequency_mhz)>0.0001 ||
+      parsed.bandwidth!=selected.bandwidth_khz || parsed.sf!=selected.sf ||
+      parsed.cr!=selected.cr || parsed.preamble!=selected.preamble))return false;
+  if(!namedPreset && profile &&
+     (std::fabs(parsed.frequency-profile->frequency_mhz)>0.0001 ||
+      parsed.bandwidth!=profile->bandwidth_khz || parsed.sf!=profile->sf ||
+      parsed.cr!=profile->cr || parsed.preamble!=profile->preamble))strcpy(parsed.meshtastic_preset,"CUSTOM");
   // Validate modem fields before any narrowing. An unset/disabled radio uses
   // frequency zero, never a hidden US fallback.
   if(!valid || !validLoRaSettings(906.875,parsed.bandwidth,parsed.sf,parsed.cr,parsed.preamble) ||
      !std::isfinite(parsed.frequency)) return false;
   if(!profile) {
     if(parsed.enabled || parsed.frequency!=0) return false;
-  } else if(legacy) {
-    if(parsed.frequency<902 || parsed.frequency>928) return false;
   } else {
     if(parsed.enabled && !profile->high_band_compatible) return false;
     const double halfWidth=parsed.bandwidth/2000.0;
@@ -109,18 +140,16 @@ inline bool parseConfigRadio(JsonVariantConst root, RadioSettings& result) {
   }
   // Named supported profiles (including legacy US) already represent a choice.
   // UNSET needs an explicit marker to distinguish Skip from a blank example.
-  parsed.selection_complete=profile ? lora_profiles::selectable(*profile) :
+  parsed.selection_complete=profile ? profile->high_band_compatible :
       (radio["selection_complete"] | false);
   if(parsed.enabled && parsed.mode && !lora_scan::findMeshCoreProfile(parsed.region,parsed.meshcore_profile))return false;
-#if defined(LORA_TUNNEL_CARDPUTER_ADV)
   // A valid Heltec SD config is not corrupt merely because this cap cannot
   // receive its frequency. Preserve its credentials/other settings and report
   // the incompatibility rather than selecting a different backup/NVS region.
-  parsed.hardware_compatible=!profile || lora_profiles::fitsHardware(
-      parsed.frequency,parsed.bandwidth,lora_profiles::hardwareMinimum,lora_profiles::hardwareMaximum);
+  parsed.hardware_compatible=!profile || (parsed.mode==1 || lora_profiles::fitsHardware(
+      parsed.frequency,parsed.bandwidth,lora_profiles::hardwareMinimum,lora_profiles::hardwareMaximum));
   if(parsed.mode && profile && !lora_scan::meshCoreProfile(parsed.region,parsed.meshcore_profile))parsed.hardware_compatible=false;
   if(!parsed.hardware_compatible) { parsed.enabled=false; parsed.selection_complete=false; }
-#endif
   result = parsed;
   return true;
 }
@@ -134,6 +163,8 @@ inline bool setConfigDocumentRegion(JsonVariant root,const char* code) {
   root["schema"]=1;
   auto radio=root["lora"];
   radio["region"]=code;
+  radio["meshtastic_preset"]="LONG_FAST";
+  radio["meshtastic_slot"]=0;
   radio["selection_complete"]=true;
   radio["enabled"]=profile!=nullptr;
   char name[40]="Choose region";
@@ -151,6 +182,25 @@ inline bool setConfigDocumentRegion(JsonVariant root,const char* code) {
   // A region change must not leave a previous region's MeshCore frequency active.
   radio["meshcore_profile"]="AUTO";
   if(!lora_scan::meshCoreProfile(code,"AUTO"))radio["mode"]="meshtastic";
+  return true;
+}
+
+inline bool setConfigDocumentMeshtastic(JsonVariant root,const char* preset,uint16_t slot) {
+  if(!root.is<JsonObject>())return false;
+  RadioSettings current;
+  if(!parseConfigRadio(root.as<JsonVariantConst>(),current))return false;
+  lora_profiles::Profile selected{};
+  if(!lora_profiles::makeProfile(current.region,preset,slot,selected) ||
+     !lora_profiles::selectable(selected))return false;
+  auto radio=root["lora"];
+  radio["meshtastic_preset"]=preset;radio["meshtastic_slot"]=slot;
+  radio["frequency_mhz"]=selected.frequency_mhz;radio["bandwidth_khz"]=selected.bandwidth_khz;
+  radio["spreading_factor"]=selected.sf;radio["coding_rate_denominator"]=selected.cr;
+  radio["preamble_symbols"]=selected.preamble;
+  char name[40];
+  std::strcpy(name,current.region);std::strcat(name," ");
+  std::strcat(name,lora_profiles::findModemPreset(preset)->name);
+  radio["name"]=name;
   return true;
 }
 

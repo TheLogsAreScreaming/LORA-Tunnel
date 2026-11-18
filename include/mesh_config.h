@@ -37,4 +37,28 @@ inline bool parseMeshKeys(JsonVariantConst radio,mesh::Key* keys,uint8_t& count,
 inline const char* loraModeName(uint8_t mode) {
   return mode==1?"meshcore":mode==2?"combined":"meshtastic";
 }
+// MeshCore uses SHA256(secret)[0] for channel identity. Compute it in the
+// decoder's crypto adapter; the descriptive local name is not part of it.
+inline bool parseMeshCoreKeys(JsonVariantConst radio,mesh::Key* keys,uint8_t& count) {
+  count=0;
+  if(!radio.containsKey("meshcore_keys"))return true;
+  if(!radio["meshcore_keys"].is<JsonArrayConst>())return false;
+  const JsonArrayConst entries=radio["meshcore_keys"];
+  if(entries.size()>mesh::MaxKeys)return false;
+  for(JsonVariantConst entry:entries) {
+    if(!entry.is<JsonObjectConst>() || !entry["name"].is<const char*>() || !entry["key_hex"].is<const char*>())return false;
+    const JsonString name=entry["name"].as<JsonString>(),hex=entry["key_hex"].as<JsonString>();
+    if(!name.size() || name.size()>39 || std::strlen(name.c_str())!=name.size() ||
+       std::strlen(hex.c_str())!=hex.size() || (hex.size()!=32 && hex.size()!=64))return false;
+    mesh::Key key{};key.length=hex.size()/2;
+    for(size_t i=0;i<key.length;++i) {
+      const int a=meshHex(hex.c_str()[i*2]),b=meshHex(hex.c_str()[i*2+1]);
+      if(a<0 || b<0)return false;
+      key.bytes[i]=uint8_t(a*16+b);
+    }
+    if(keys)keys[count]=key;
+    ++count;
+  }
+  return true;
+}
 }

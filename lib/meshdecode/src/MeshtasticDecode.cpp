@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Valleytech Solutions. SPDX-License-Identifier: MIT
 // Original bounded wire-format reader; no upstream implementation/generated
-// protobufs incorporated. Numeric protocol facts inspected 2026-11-05:
-// https://github.com/meshtastic/protobufs/tree/85f3f4357946a52daa5310285476d2dffb137c7b/meshtastic
+// protobufs incorporated. Numeric protocol facts rechecked 2026-11-17:
+// https://github.com/meshtastic/protobufs/tree/62b09edf40711fd7bd17804b2fa62ba327fcea60/meshtastic
 // (mesh.proto, telemetry.proto, portnums.proto)
-// https://github.com/meshtastic/firmware/tree/9bcf0f776edabb3b2447db323323cf2c49835452/src/mesh
+// https://github.com/meshtastic/firmware/tree/6d41e279f1f51bd59f687b9d441c1bf47b1594fc/src/mesh
 // (Channels.h, CryptoEngine.cpp). The well-known default key is public data.
 #include "mesh_decode.h"
 #include "mesh_header.h"
@@ -265,17 +265,16 @@ void decodeMeshtastic(const std::uint8_t* data,std::size_t length,const Crypto& 
     const bool defaultAttempt=index==keyCount;
     const Key* key=defaultAttempt?nullptr:&keys[index];
     if(key && (key->channel_hash!=header.channel || (key->length!=0 && key->length!=16 && key->length!=32)))continue;
-    // 0xA6 is the ordinary LongFast/default hash XOR the AEAD discriminator.
-    // It is only a hint (hashes collide), so explicit configured CTR keys win.
-    if(defaultAttempt && header.channel==0xa6)continue;
+    // An eight-bit channel hash is not a reliable cipher discriminator. Even
+    // 0xa6 can be a renamed CTR channel; validate the decrypted protobuf.
     const std::uint8_t* keyBytes=defaultAttempt?publicKey:key->bytes;
     const std::size_t keyLength=defaultAttempt?sizeof(publicKey):key->length;
-    attempted=true;
     if(keyLength) {
       if(!crypto.ctr || !crypto.ctr(keyBytes,keyLength,nonce,data+16,payloadLength,scratch))continue;
     } else {
       hadPlaintext=true;std::memcpy(scratch,data+16,payloadLength);
     }
+    attempted=true;
     Result candidate;candidate.protocol=Protocol::Meshtastic;candidate.node_id=header.from;
     if(parseData(scratch,payloadLength,candidate)) {
       out=candidate;clearScratch(scratch,sizeof(scratch));return;
@@ -283,7 +282,6 @@ void decodeMeshtastic(const std::uint8_t* data,std::size_t length,const Crypto& 
     clearScratch(scratch,sizeof(scratch));
   }
   clearScratch(scratch,sizeof(scratch));
-  out.status=hadPlaintext?Status::Malformed:attempted?Status::KeyMismatch:
-      publicDefault && header.channel==0xa6?Status::Unsupported:Status::Encrypted;
+  out.status=hadPlaintext?Status::Malformed:attempted?Status::KeyMismatch:Status::Encrypted;
 }
 } } // namespace tunnel::mesh

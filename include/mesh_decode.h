@@ -14,6 +14,9 @@ struct Result {
   bool has_node=false, has_position=false, has_altitude=false, has_time=false;
   bool has_battery=false, has_voltage=false, has_text=false, sanitized=false;
   bool signature_present=false;
+  // MeshCore's two-byte group MAC confirms only shared-channel membership,
+  // never the claimed sender name. Keep this separate from authentication.
+  bool channel_mac_valid=false;
   bool has_hardware=false, has_role=false;
   std::uint8_t packet_type=0, path_count=0, path_hash_size=0, precision_bits=0;
   std::uint16_t port=0;
@@ -28,6 +31,9 @@ struct Result {
 struct Crypto {
   bool (*ctr)(const std::uint8_t*,std::size_t,const std::uint8_t[16],const std::uint8_t*,std::size_t,std::uint8_t*)=nullptr;
   bool (*verify)(const std::uint8_t[32],const std::uint8_t[64],const std::uint8_t*,std::size_t)=nullptr;
+  bool (*ecb)(const std::uint8_t[16],const std::uint8_t*,std::size_t,std::uint8_t*)=nullptr;
+  bool (*hmac)(const std::uint8_t*,std::size_t,const std::uint8_t*,std::size_t,std::uint8_t[32])=nullptr;
+  bool (*sha256)(const std::uint8_t*,std::size_t,std::uint8_t[32])=nullptr;
 };
 struct Key {
   std::uint8_t bytes[32]{};
@@ -37,7 +43,10 @@ constexpr std::size_t MaxKeys=4;
 // Known key list belongs to configuration, never to observations or log output.
 void decodeMeshtastic(const std::uint8_t* data,std::size_t length,const Crypto& crypto,
                       const Key* keys,std::size_t keyCount,bool publicDefault,Result& out);
-void decodeMeshCore(const std::uint8_t* data,std::size_t length,const Crypto& crypto,Result& out);
+// MeshCore ignores Key.channel_hash: its hash is derived from the 16/32-byte
+// secret. Public adverts need no channel key; private peer messages remain raw.
+void decodeMeshCore(const std::uint8_t* data,std::size_t length,const Crypto& crypto,Result& out,
+                    const Key* keys=nullptr,std::size_t keyCount=0,bool publicDefault=true);
 const Crypto& platformCrypto();
 inline const char* protocolName(Protocol p) {
   return p==Protocol::Meshtastic?"meshtastic":p==Protocol::MeshCore?"meshcore":"unknown";

@@ -50,6 +50,7 @@ struct Summary {
   bool used=false;
   Kind kind=Kind::Wifi;
   uint8_t addressType=255;
+  uint8_t meshProtocol=0;
   char id[24]{},name[40]{},label[32]{},evidence[board::SUMMARY_EVIDENCE_BYTES]{};
   recon::Category category=recon::Category::None;
   recon::Confidence confidence=recon::Confidence::None;
@@ -106,7 +107,8 @@ void consume(Observation& event) {
       mesh::decodeMeshtastic(event.raw,event.length,mesh::platformCrypto(),config.mesh_keys,
                             config.mesh_key_count,config.decode_public,event.mesh_data);
     else if(event.radio.protocol==2)
-      mesh::decodeMeshCore(event.raw,event.length,mesh::platformCrypto(),event.mesh_data);
+      mesh::decodeMeshCore(event.raw,event.length,mesh::platformCrypto(),event.mesh_data,
+                           config.meshcore_keys,config.meshcore_key_count,config.decode_public);
     if(event.mesh_data.status==mesh::Status::Decoded && event.mesh_data.authentication!=mesh::Authentication::Failed)++meshDecoded; else ++meshUnknown;
     strlcpy(event.name,event.mesh_data.name[0]?event.mesh_data.name:event.mesh_data.short_name,sizeof(event.name));
   }
@@ -164,6 +166,7 @@ void consume(Observation& event) {
   }
   if(!selected) { selected=oldest; *selected=Summary{}; selected->used=true; selected->kind=event.kind; selected->addressType=event.address_type; strlcpy(selected->id,identity,sizeof(selected->id)); }
   selected->last=event.mono_ms; selected->rssi=event.rssi; ++selected->seen;
+  if(event.kind==Kind::Lora)selected->meshProtocol=uint8_t(event.mesh_data.protocol);
   // A later position/telemetry packet must not erase an earlier node name.
   if(event.name[0] || event.kind!=Kind::Lora)strlcpy(selected->name,event.name,sizeof(selected->name));
   if(event.kind==Kind::Lora) {
@@ -277,15 +280,28 @@ void performActions() {
       if(!config.buzzer)alertPlayer.setEnabled(false);
       break;
     case ui::Action::SaveLoRaMode:
+    case ui::Action::SaveMeshtasticPreset:
+    case ui::Action::SaveMeshtasticSlot:
+    case ui::Action::SaveMeshCoreProfile:
+    case ui::Action::SaveLoRaDwell:
+    case ui::Action::SavePublicDecode:
       if(capturing || stopping || !loggerIdle() || uploaderBusy())strlcpy(model.notice,"Stop and save before changing LoRa",sizeof(model.notice));
-      else if(!storageReady())strlcpy(model.notice,"Insert SD to save LoRa scan mode",sizeof(model.notice));
+      else if(!storageReady())strlcpy(model.notice,"Insert SD to save mesh settings",sizeof(model.notice));
       else {
         xSemaphoreTake(busMutex,portMAX_DELAY);
-        const bool saved=saveLoRaMode(uint8_t(action.field));
+        bool saved=false;
+        if(action.action==ui::Action::SaveLoRaMode && action.field>=0 && action.field<=2)saved=saveLoRaMode(uint8_t(action.field));
+        else if(action.action==ui::Action::SaveMeshtasticPreset)saved=saveMeshtasticPreset(action.value);
+        else if(action.action==ui::Action::SaveMeshtasticSlot && action.field>=0 && action.field<=65535)saved=saveMeshtasticSlot(uint16_t(action.field));
+        else if(action.action==ui::Action::SaveMeshCoreProfile)saved=saveMeshCoreProfile(action.value);
+        else if(action.action==ui::Action::SaveLoRaDwell && action.field>=0)saved=saveLoRaDwell(uint32_t(action.field));
+        else if(action.action==ui::Action::SavePublicDecode && (action.field==0 || action.field==1))saved=savePublicDecode(action.field!=0);
         xSemaphoreGive(busMutex);
-        if(!saved)strlcpy(model.notice,"Mode unavailable here or save failed",sizeof(model.notice));
-        else if(!scannersConfigureLoRa())strlcpy(model.notice,"Mode saved; radio initialization failed",sizeof(model.notice));
-        else strlcpy(model.notice,"LoRa scan mode saved to SD",sizeof(model.notice));
+        if(!saved)strlcpy(model.notice,"Profile/slot unavailable or save failed",sizeof(model.notice));
+        else if(!scannersConfigureLoRa())strlcpy(model.notice,"Saved; radio initialization failed",sizeof(model.notice));
+        else if(!regionHardwareCompatible())strlcpy(model.notice,"Saved; profile outside radio band",sizeof(model.notice));
+        else if(!config.lora_enabled)strlcpy(model.notice,"Saved; LoRa remains disabled",sizeof(model.notice));
+        else strlcpy(model.notice,"Mesh settings saved to SD",sizeof(model.notice));
       }
       break;
     case ui::Action::SaveRegion:
@@ -359,6 +375,13 @@ void refreshModel() {
   strlcpy(model.phase,stopping?"Saving":scanPhase(),sizeof(model.phase));
   const auto radioStatus=loraScanStatus();
   model.lora_mode=config.lora_mode;model.mesh_decoded=meshDecoded;model.mesh_unknown=meshUnknown;
+  strlcpy(model.meshtastic_preset,config.meshtastic_preset,sizeof(model.meshtastic_preset));
+  model.meshtastic_slot=config.meshtastic_slot;
+  const auto* modem=lora_profiles::findModemPreset(config.meshtastic_preset);
+  const auto* region=lora_profiles::find(config.region);
+  model.meshtastic_slots=modem&&region?lora_profiles::slotCount(*region,*modem):0;
+  strlcpy(model.meshcore_profile,config.meshcore_profile,sizeof(model.meshcore_profile));
+  model.lora_dwell_ms=config.lora_dwell_ms;model.decode_public=config.decode_public;
   strlcpy(model.profile,config.lora_enabled?radioStatus.active.name:"OFF: Settings > LoRa region",sizeof(model.profile));
   if(radioStatus.combined)snprintf(model.lora_detail,sizeof(model.lora_detail),"Both / next %lus / decoded %lu",(unsigned long)((radioStatus.remaining_ms+999)/1000),(unsigned long)meshDecoded);
   else snprintf(model.lora_detail,sizeof(model.lora_detail),"Locked / decoded %lu / other %lu",(unsigned long)meshDecoded,(unsigned long)meshUnknown);
@@ -374,7 +397,8 @@ void refreshModel() {
       const Summary& summary=summaries[pick];
       const char* title=summary.name[0]?summary.name:summary.id;
       if(type==2) {
-        const char* badge=!strncmp(summary.id,"MT:",3)?"MT":!strncmp(summary.id,"MC:",3)?"MC":"?";
+        const char* badge=summary.meshProtocol==uint8_t(mesh::Protocol::Meshtastic)?"MT":
+            summary.meshProtocol==uint8_t(mesh::Protocol::MeshCore)?"MC":"?";
         snprintf(model.recent[type][line],48,"[%s] %.21s %ddBm x%lu",badge,title,summary.rssi,(unsigned long)summary.seen);
         strlcpy(model.mesh_recent_detail[line],summary.label,sizeof(model.mesh_recent_detail[line]));
       } else snprintf(model.recent[type][line],48,"%.25s %ddBm x%lu",title,summary.rssi,(unsigned long)summary.seen);

@@ -1,6 +1,7 @@
 """Exact-policy and fail-closed tests; hardware/build execution is never performed."""
 import copy
 import json
+import os
 from pathlib import Path
 import runpy
 import shutil
@@ -13,8 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import cardputer_linker as linker
 
-SDK = ROOT / ".pio-core/packages/framework-arduinoespressif32-libs/esp32s3"
-OBJDUMP = ROOT / ".pio-core/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump"
+CORE = Path(os.environ.get("PLATFORMIO_CORE_DIR", ROOT / ".pio-core"))
+SDK = CORE / "packages/framework-arduinoespressif32-libs/esp32s3"
+OBJDUMP = CORE / "packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump"
 if not OBJDUMP.exists():
     OBJDUMP = OBJDUMP.with_suffix(".exe")
 

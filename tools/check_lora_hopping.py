@@ -28,7 +28,7 @@ def check():
     for signature in ["void accountRadioListen()", "void stopRadioListen()",
                       "int armRadioReceive()", "bool applyRadioProfile(",
                       "void serviceRadioTransition()", "void readLoRaPacketLocked(",
-                      "void serviceLoRa()", "void serviceRadioHop()"]:
+                      "void serviceLoRa()", "void serviceRadioHop()", "bool scannersConfigureLoRa()"]:
         actual += extract(source, signature) + "\n"
     fixture = (ROOT / "tests/scanner_host/hopping.cpp").read_text(encoding="utf-8")
     if fixture.count("// SCANNER_IMPLEMENTATION") != 1:
@@ -37,17 +37,22 @@ def check():
         work = Path(tmp)
         unit = work / "radio.cpp"
         unit.write_text(fixture.replace("// SCANNER_IMPLEMENTATION", actual), encoding="utf-8")
-        binary = work / ("radio.exe" if os.name == "nt" else "radio")
         cxx = compiler()
-        args = [cxx, "-std=c++14", "-O1", "-Wall", "-Wextra", "-I", str(ROOT / "tests/capture_host"),
-                "-I", str(ROOT / "include"), "-I", str(ROOT / "lib/recon/src"), str(unit), "-o", str(binary)]
-        if os.name == "nt":
-            args += ["-static-libgcc", "-static-libstdc++"]
         environment = os.environ.copy()
         environment["PATH"] = str(Path(cxx).parent) + os.pathsep + environment.get("PATH", "")
-        subprocess.run(args, cwd=ROOT, env=environment, check=True)
-        result = subprocess.run([str(binary)], cwd=ROOT, env=environment, check=True, capture_output=True, text=True)
-        return result.stdout.strip()
+        results = []
+        for target, defines in (("Heltec", []), ("Cardputer", ["-DLORA_TUNNEL_CARDPUTER_ADV"])):
+            binary = work / (target + (".exe" if os.name == "nt" else ""))
+            args = [cxx, "-std=c++14", "-O1", "-Wall", "-Wextra", *defines, "-I", str(ROOT / "tests/capture_host"),
+                    "-I", str(ROOT / "include"), "-I", str(ROOT / "lib/recon/src"), str(unit), "-o", str(binary)]
+            if os.name == "nt":
+                args += ["-static-libgcc", "-static-libstdc++"]
+            subprocess.run(args, cwd=ROOT, env=environment, check=True)
+            result = subprocess.run([str(binary)], cwd=ROOT, env=environment, capture_output=True, text=True)
+            if result.returncode:
+                raise RuntimeError(target + ": " + result.stdout + result.stderr)
+            results.append(target + ": " + result.stdout.strip())
+        return "\n".join(results)
 
 
 if __name__ == "__main__":

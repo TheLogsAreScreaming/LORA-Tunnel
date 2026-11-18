@@ -9,6 +9,7 @@
 #include <AES.h>
 #include <Ed25519.h>
 #include <RNG.h>
+#include <SHA256.h>
 #include <array>
 #include <cassert>
 #include <cstdlib>
@@ -72,7 +73,21 @@ bool verify(const std::uint8_t key[32], const std::uint8_t signature[64],
             const std::uint8_t* message, std::size_t length) {
     return ed25519InputsAllowed(key,signature) && Ed25519::verify(signature,key,message,length);
 }
-const Crypto crypto{ctr,verify};
+bool ecb(const std::uint8_t key[16], const std::uint8_t* input,
+         std::size_t length, std::uint8_t* output) {
+    AES128 cipher;
+    if (!key || !input || !output || !length || length > 176 || length % 16 || !cipher.setKey(key,16)) return false;
+    for (std::size_t i = 0; i < length; i += 16) cipher.decryptBlock(output+i,input+i);
+    return true;
+}
+bool sha256(const std::uint8_t* input, std::size_t length, std::uint8_t output[32]) {
+    SHA256 hash; hash.update(input,length); hash.finalize(output,32); return true;
+}
+bool hmac256(const std::uint8_t* key, std::size_t keyLength,
+             const std::uint8_t* input, std::size_t length, std::uint8_t output[32]) {
+    hmac<SHA256>(output,32,key,keyLength,input,length); return true;
+}
+const Crypto crypto{ctr,verify,ecb,hmac256,sha256};
 
 void checkNistCtr() {
     // NIST SP800-38A F.5.1 and F.5.5, four blocks, AES128 and AES256.
@@ -100,7 +115,7 @@ void checkNistCtr() {
 }
 
 void checkMeshtastic() {
-    const auto packet = hex("ffffffff78563412efcdab8963080000"
+    auto packet = hex("ffffffff78563412efcdab8963080000"
                             "d413e53fbc611a8c99dd40e9f317c127de159c170aeda33d");
     Result result;
     decodeMeshtastic(packet.data(),packet.size(),crypto,nullptr,0,true,result);
@@ -111,6 +126,15 @@ void checkMeshtastic() {
     assert(std::strcmp(result.name,"Bench node") == 0);
     assert(std::strcmp(result.short_name,"BN") == 0);
     assert(result.hardware == 110 && result.role == 0);
+    // The ciphertext and nonce do not depend on modem preset or channel hash.
+    // Exercise LongFast, LongTurbo and the former false AEAD-hint exclusion.
+    for (std::uint8_t channel : {0x08,0x76,0xa6}) {
+        packet[13] = channel;
+        decodeMeshtastic(packet.data(),packet.size(),crypto,nullptr,0,true,result);
+        assert(result.status == Status::Decoded && result.port == 4);
+        assert(std::strcmp(result.name,"Bench node") == 0);
+    }
+    packet[13] = 8;
     Key wrong{};
     wrong.length = 16; wrong.channel_hash = 8;
     decodeMeshtastic(packet.data(),packet.size(),crypto,&wrong,1,false,result);
@@ -118,6 +142,76 @@ void checkMeshtastic() {
     assert(!result.has_position && result.name[0] == 0);
     decodeMeshtastic(packet.data(),packet.size(),crypto,nullptr,0,false,result);
     assert(result.status == Status::Encrypted);
+}
+
+void checkGroupCrypto() {
+    // NIST SP800-38A F.1.2 AES128 ECB decryption.
+    const auto key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+    const auto cipher = hex("3ad77bb40d7a3660a89ecaf32466ef97");
+    const auto plain = hex("6bc1bee22e409f96e93d7e117393172a");
+    std::array<std::uint8_t,32> output{};
+    assert(ecb(key.data(),cipher.data(),cipher.size(),output.data()));
+    assert(std::memcmp(output.data(),plain.data(),plain.size()) == 0);
+    // RFC4231 HMAC-SHA256 test case 1.
+    const Bytes hmacKey(20,0x0b);
+    const std::uint8_t hmacInput[] = {'H','i',' ','T','h','e','r','e'};
+    const auto expected = hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+    assert(hmac256(hmacKey.data(),hmacKey.size(),hmacInput,sizeof(hmacInput),output.data()));
+    assert(std::memcmp(output.data(),expected.data(),32) == 0);
+    const auto publicKey = hex("8b3387e9c5cdea6ac9e5edbaa115cd72");
+    const auto expectedHash = hex("1155f1870f91778646972b7bde747d989cf9f95416b50829666036563365424d");
+    assert(sha256(publicKey.data(),publicKey.size(),output.data()));
+    assert(std::memcmp(output.data(),expectedHash.data(),32) == 0);
+
+    // Independently generated with Python cryptography AES + stdlib HMAC and
+    // SHA256 (see generate_group_vectors.py). Names/locations are synthetic.
+    const auto packet = hex("15001139693e9b627acec56e8a090b793c71b2403af8fa1693003875586885f5542f244c86");
+    Result result;
+    decodeMeshCore(packet.data(),packet.size(),crypto,result);
+    assert(result.status == Status::Decoded && result.channel_mac_valid);
+    assert(result.authentication == Authentication::Unverified && !result.has_node);
+    assert(!result.signature_present && result.timestamp == 0x65543210);
+    assert(std::strcmp(result.text,"Bench: hello turbo") == 0);
+    assert(std::strcmp(result.name,"Bench") == 0);
+    decodeMeshCore(packet.data(),packet.size(),crypto,result,nullptr,0,false);
+    assert(result.status == Status::Encrypted && !result.has_text);
+    decodeMeshCore(packet.data(),packet.size(),{},result);
+    assert(result.status == Status::Encrypted && !result.channel_mac_valid);
+    // Tamper each MAC/cipher byte. A matching channel hash with a failing MAC
+    // must not produce text, identity, timestamp or a positive MAC result.
+    for (std::size_t i = 3; i < packet.size(); ++i) {
+        auto tampered = packet; tampered[i] ^= 1;
+        decodeMeshCore(tampered.data(),tampered.size(),crypto,result);
+        assert(result.status == Status::KeyMismatch);
+        assert(!result.channel_mac_valid && !result.has_text && !result.has_time);
+        assert(!result.has_node && result.name[0] == 0 && result.text[0] == 0);
+    }
+    for (std::uint8_t route = 0; route < 4; ++route) {
+        auto routed = packet; routed[0] = std::uint8_t(0x14 | route);
+        routed[1] = 0x82;
+        routed.insert(routed.begin()+2,{1,2,3,4,5,6});
+        if (route == 0 || route == 3) routed.insert(routed.begin()+1,{0x12,0x34,0x56,0x78});
+        decodeMeshCore(routed.data(),routed.size(),crypto,result);
+        assert(result.status == Status::Decoded && result.path_count == 2 && result.path_hash_size == 3);
+        assert(std::strcmp(result.text,"Bench: hello turbo") == 0);
+    }
+    const char* privatePackets[] = {
+        "1500be335b0c9db8d42a71a3f05eaed53ea66594f181ef19c4aad7baba47c053f022e5f1ab",
+        "15006395614912db14104f3f77189cd769696df548fe0381ca90e0cb454723d3f1c8ece2f0"
+    };
+    const char* expectedTexts[] = {"Other: private group","Full: 32 byte channel"};
+    for (unsigned i = 0; i != 2; ++i) {
+        Key supplied; supplied.length = std::uint8_t(16 + i*16);
+        for (unsigned j = 0; j < supplied.length; ++j) supplied.bytes[j] = std::uint8_t(j);
+        supplied.channel_hash = 0; // ignored for MeshCore, derived from key
+        const auto privatePacket = hex(privatePackets[i]);
+        decodeMeshCore(privatePacket.data(),privatePacket.size(),crypto,result);
+        assert(result.status == Status::Encrypted && !result.has_text);
+        decodeMeshCore(privatePacket.data(),privatePacket.size(),crypto,result,&supplied,1,false);
+        assert(result.status == Status::Decoded && result.channel_mac_valid);
+        assert(std::strcmp(result.text,expectedTexts[i]) == 0);
+        assert(result.has_time == (i != 0));
+    }
 }
 
 void checkMeshCore() {
@@ -206,9 +300,12 @@ int main() {
     checkNistCtr();
     checkMeshtastic();
     checkMeshCore();
+    checkGroupCrypto();
     checkEd25519RejectsTrivialForgery();
     std::cout << "PASS: NIST AES128/256 CTR vectors; independent encrypted Meshtastic"
-                 " packet; signed MeshCore advert; key/time/signature/name tampering;"
+                 " LongFast/LongTurbo/renamed packets; signed MeshCore advert;"
+                 " NIST ECB/RFC4231 HMAC; public/private 16/32-byte group keys;"
+                 " MAC/cipher/key/time/signature/name tampering;"
                  " mutable-path/no-verifier boundaries; weak points/noncanonical scalars.\n"
                  "Host uses real pinned rweather AES/Ed25519; production ESP32 mbedTLS"
                  " AES runtime remains a device-test requirement.\n";

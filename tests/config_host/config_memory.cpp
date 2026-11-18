@@ -47,6 +47,101 @@ void released(){expect(host::scratchLive==0,"configuration scratch released on r
  expect(std::all_of(host::frameScratch,host::frameScratch+16896,[](uint8_t b){return b==0;}),"all JSON and file-buffer secret bytes are wiped on release");
 #endif
 }
+void meshSettingsChecks(){
+  using namespace tunnel;
+  reset();
+  // These are public synthetic fixture keys, never captured/private user data.
+  host::files[primary]=R"({"schema":1,"lora":{"region":"US","enabled":true,"mode":"combined","meshtastic_preset":"LONG_FAST","meshtastic_slot":0,"meshcore_profile":"AUTO","decode_public":true,"meshtastic_keys":[{"name":"LongFast","key_hex":"d4f1bb3a20290759f0bcffabcf4e6901","future_key_metadata":"keep"}],"meshcore_keys":[{"name":"Fixture sixteen","key_hex":"000102030405060708090a0b0c0d0e0f"},{"name":"Fixture thirtytwo","key_hex":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}],"future_radio_setting":{"preserved":true}},"credentials":{"wifi_ssid":"Fixture","wifi_password":"fixture-password"},"extension":{"preserved":"yes"}})";
+  expect(loadConfig(),"mesh settings fixture loads");released();
+  expect(config.mesh_key_count==1&&config.meshcore_key_count==2&&config.meshcore_keys[1].length==32,"both protocol key lists load");
+  expect(saveMeshtasticPreset("LONG_TURBO"),"LongTurbo preset saves");released();
+  expect(!std::strcmp(config.meshtastic_preset,"LONG_TURBO")&&config.frequency==908.75f&&config.bandwidth==500&&config.sf==11&&config.cr==8,"saved LongTurbo updates modulation and default frequency together");
+  expect(saveMeshtasticSlot(3),"explicit Meshtastic slot saves");released();
+  expect(config.meshtastic_slot==3&&config.frequency==903.25f,"explicit slot immediately updates receive frequency");
+  expect(saveLoRaDwell(120000),"mesh dwell saves");released();
+  expect(savePublicDecode(false),"public key preference saves");released();
+  expect(saveMeshCoreProfile("US-NARROW"),"explicit MeshCore profile saves");released();
+  expect(saveLoRaMode(1),"MeshCore-only mode saves");released();
+  expect(config.lora_mode==1&&config.lora_dwell_ms==120000&&!config.decode_public&&config.lora_enabled&&regionHardwareCompatible()&&regionSelectionMade(),"complete live mesh state matches committed settings");
+  expect(loadConfig(),"committed mesh settings reload");released();
+  expect(!std::strcmp(config.meshtastic_preset,"LONG_TURBO")&&config.meshtastic_slot==3&&config.frequency==903.25f&&config.bandwidth==500&&config.lora_mode==1&&config.lora_dwell_ms==120000&&!config.decode_public,"preset slot dwell mode and public preference survive restart");
+  expect(config.mesh_key_count==1&&config.meshcore_key_count==2&&config.mesh_keys[0].bytes[0]==0xd4&&config.meshcore_keys[0].length==16&&config.meshcore_keys[1].length==32&&config.meshcore_keys[1].bytes[31]==31,"explicit keys remain usable with public defaults disabled");
+  const auto assertPreserved=[](){
+    ArduinoJson::StaticJsonDocument<4096> document;
+    expect(!deserializeJson(document,host::files[primary]),"saved mesh document parses");
+    expect(document["extension"]["preserved"]=="yes"&&document["lora"]["future_radio_setting"]["preserved"]==true&&document["lora"]["meshtastic_keys"][0]["future_key_metadata"]=="keep","mesh saves preserve unknown root radio and key fields");
+    expect(document["lora"]["meshtastic_keys"][0]["key_hex"]=="d4f1bb3a20290759f0bcffabcf4e6901"&&document["lora"]["meshcore_keys"][0]["name"]=="Fixture sixteen"&&document["lora"]["meshcore_keys"][1]["key_hex"]=="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","mesh saves preserve exact named key documents");
+    expect(document["credentials"]["wifi_password"]=="fixture-password","mesh saves preserve unrelated credentials");
+  };
+  assertPreserved();
+  const auto before=host::files[primary];
+  uint8_t live[sizeof(config)];std::memcpy(live,&config,sizeof(config));
+  const bool selected=regionSelectionMade(),compatible=regionHardwareCompatible();
+  host::failWritePath="config.tmp";
+  for(unsigned operation=0;operation!=6;++operation){
+    bool result=false;
+    switch(operation){
+      case 0:result=saveMeshtasticPreset("MEDIUM_FAST");break;
+      case 1:result=saveMeshtasticSlot(4);break;
+      case 2:result=saveMeshCoreProfile("AUTO");break;
+      case 3:result=saveLoRaDwell(60000);break;
+      case 4:result=savePublicDecode(true);break;
+      case 5:result=saveLoRaMode(0);break;
+    }
+    expect(!result,"mesh setting reports temporary-write failure");released();
+    expect(host::files[primary]==before&&!host::files.count("/lora-tunnel/config.tmp"),"failed mesh save preserves primary and removes temporary file");
+    expect(!std::memcmp(live,&config,sizeof(config))&&regionSelectionMade()==selected&&regionHardwareCompatible()==compatible,"failed mesh save leaves all live settings and compatibility flags unchanged");
+  }
+  host::failWritePath.clear();
+  host::files["/lora-tunnel/config.bak"]=before;host::files[primary]="{bad";
+  expect(loadConfig()&&configLoadState==ConfigLoadState::Backup,"mesh configuration recovers from valid backup");released();
+  expect(saveMeshtasticSlot(4)&&configLoadState==ConfigLoadState::Primary,"mesh save promotes recovered backup with chosen slot");released();assertPreserved();
+  const auto recoverable=host::files[primary];
+  for(unsigned corrupt=0;corrupt!=2;++corrupt){
+    if(corrupt){host::files[primary]="{bad primary";host::files["/lora-tunnel/config.bak"]="{bad backup";}
+    else{host::files.erase(primary);host::files.erase("/lora-tunnel/config.bak");}
+    const auto untouched=host::files;
+    std::memcpy(live,&config,sizeof(config));
+    expect(!savePublicDecode(true),"missing or corrupt key source cannot be replaced by a seed without named keys");released();
+    expect(host::files==untouched&&!std::memcmp(live,&config,sizeof(config))&&config.mesh_key_count==1&&config.meshcore_key_count==2,"refused fallback preserves both configured key lists and every surviving source byte");
+    host::files[primary]=recoverable;
+    expect(saveLoRaDwell(60000),"save resumes after original named-key document is restored");released();assertPreserved();
+  }
+  // A recovered backup can contain different channel keys and public-decode
+  // policy. A mesh save must apply the exact committed source before restarting
+  // reception, rather than keep the newer RAM-only key list until reboot.
+  {
+    ArduinoJson::StaticJsonDocument<4096> document;
+    expect(!deserializeJson(document,host::files[primary]),"backup-key regression baseline parses");
+    auto radio=document["lora"];
+    radio["decode_public"]=true;
+    auto meshtastic=radio["meshtastic_keys"].to<JsonArray>();
+    auto first=meshtastic.createNestedObject();first["name"]="Backup one";first["key_hex"]="000102030405060708090a0b0c0d0e0f";
+    auto second=meshtastic.createNestedObject();second["name"]="Backup two";second["key_hex"]="101112131415161718191a1b1c1d1e1f";
+    auto meshcore=radio["meshcore_keys"].to<JsonArray>();
+    auto group=meshcore.createNestedObject();group["name"]="Backup group";group["key_hex"]="202122232425262728292a2b2c2d2e2f";
+    std::string alternate;serializeJson(document,alternate);
+    host::files["/lora-tunnel/config.bak"]=alternate;host::files[primary]="{bad";
+    expect(!config.decode_public&&config.mesh_key_count==1&&config.meshcore_key_count==2,"live keys and public setting differ from recovered source before save");
+    expect(saveMeshtasticSlot(5),"mesh save recovers alternative channel-key backup");released();
+    expect(config.decode_public&&config.mesh_key_count==2&&config.meshcore_key_count==1&&config.mesh_keys[0].bytes[0]==0&&config.mesh_keys[1].bytes[0]==0x10&&config.meshcore_keys[0].bytes[0]==0x20,"committed backup public preference and both key lists immediately replace live decoder configuration");
+    expect(loadConfig()&&config.decode_public&&config.mesh_key_count==2&&config.meshcore_key_count==1&&config.meshcore_keys[0].bytes[0]==0x20&&config.meshtastic_slot==5,"recovered decoder configuration matches after restart");released();
+  }
+#if defined(LORA_TUNNEL_CARDPUTER_ADV)
+  // A valid MeshCore-only import may retain inactive Meshtastic settings above
+  // the U214's 923 MHz ceiling. Activating them must disable LoRa immediately.
+  reset();host::files[primary]=R"({"schema":1,"lora":{"region":"US","enabled":true,"mode":"meshcore","meshtastic_preset":"LONG_TURBO","meshtastic_slot":52,"meshcore_profile":"US-NARROW"}})";
+  expect(loadConfig()&&config.lora_enabled&&regionHardwareCompatible()&&config.frequency==927.75f,"inactive out-of-band Meshtastic settings do not prevent valid MeshCore-only reception");released();
+  expect(saveLoRaMode(0),"switch from MeshCore-only to unavailable Meshtastic persists explicit choice");released();
+  expect(config.lora_mode==0&&!config.lora_enabled&&!regionHardwareCompatible()&&!regionSelectionMade(),"activating out-of-band profile immediately synchronizes disabled compatibility state");
+  expect(saveMeshtasticSlot(14),"compatible slot repairs imported out-of-band profile");released();
+  expect(config.lora_enabled&&regionHardwareCompatible()&&regionSelectionMade()&&config.frequency==908.75f,"compatible slot immediately restores enabled state and selection flags");
+  expect(loadConfig()&&config.lora_enabled&&regionHardwareCompatible()&&config.meshtastic_slot==14,"repaired profile remains enabled after restart");released();
+  reset();host::files[primary]=R"({"schema":1,"lora":{"region":"US","enabled":true,"mode":"combined","meshtastic_preset":"LONG_FAST","meshcore_profile":"US-SOCAL"}})";
+  expect(loadConfig()&&!config.lora_enabled&&!regionHardwareCompatible(),"unavailable imported MeshCore profile disables combined reception");released();
+  expect(saveMeshCoreProfile("US-NARROW")&&config.lora_enabled&&regionHardwareCompatible()&&regionSelectionMade(),"compatible MeshCore profile restores all live compatibility flags");released();
+#endif
+}
 }
 int main(){using namespace tunnel;
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
@@ -163,5 +258,6 @@ int main(){using namespace tunnel;
   const auto safe=host::files[primary];host::failScratch=true;const auto heldCalls=host::bufferCalls;
   expect(!saveAutoUpload(0,true)&&host::files[primary]==safe&&host::bufferCalls==heldCalls,"unavailable framebuffer lease performs no SD I/O or heap fallback");released();host::failScratch=false;
 #endif
-  std::cout<<"Config memory host: "<<checks<<" checks passed; full16 KiB arena, scoped lease/heap and exact rule storage verified.\n";
+  meshSettingsChecks();
+  std::cout<<"Config memory host: "<<checks<<" checks passed; full16 KiB arena, scoped lease/heap, exact rule storage and mesh-setting persistence verified.\n";
 }

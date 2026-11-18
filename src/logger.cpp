@@ -238,7 +238,7 @@ void serialize(const Observation& event) {
     const auto& decoded=event.mesh_data;
     lora["payload_status"]=mesh::statusName(decoded.status);
     lora["protocol"]=mesh::protocolName(decoded.protocol);
-    lora["decoder_version"]=1;
+    lora["decoder_version"]=2;
     lora["classification"]=decoded.status==mesh::Status::Decoded?mesh::protocolName(decoded.protocol):
         radio.protocol==1?"meshtastic_candidate":radio.protocol==2?"meshcore_candidate":"unknown";
     char bytes[511]; hex(event.raw,loraLength,bytes); lora["raw_hex"]=bytes;
@@ -258,6 +258,7 @@ void serialize(const Observation& event) {
     auto payload=lora.createNestedObject("decoded");
     payload["authentication"]=mesh::authenticationName(decoded.authentication);
     payload["signature_present"]=decoded.signature_present;
+    payload["channel_mac_valid"]=decoded.channel_mac_valid;
     payload["text_sanitized_or_truncated"]=decoded.sanitized;
     if(decoded.protocol==mesh::Protocol::Meshtastic)payload["port"]=decoded.port;
     if(decoded.protocol==mesh::Protocol::MeshCore) {

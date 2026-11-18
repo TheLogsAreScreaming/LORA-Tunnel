@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 namespace tunnel { namespace lora_profiles {
 // Original receive-profile data derived from Meshtastic's region definitions,
@@ -53,9 +54,9 @@ inline const Profile* find(const char* code) {
   return nullptr;
 }
 inline bool fitsHardware(double frequency, double bandwidth,
-                         double minimum, double maximum) {
+                         double minimum, double maximum,double tolerance=0.000001) {
   const double halfWidth=bandwidth/2000.0;
-  return frequency-halfWidth>=minimum-0.000001 && frequency+halfWidth<=maximum+0.000001;
+  return frequency-halfWidth>=minimum-tolerance && frequency+halfWidth<=maximum+tolerance;
 }
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
 constexpr double hardwareMinimum=868.0, hardwareMaximum=923.0;
@@ -67,4 +68,61 @@ inline bool selectable(const Profile& profile) {
       fitsHardware(profile.frequency_mhz,profile.bandwidth_khz,hardwareMinimum,hardwareMaximum);
 }
 inline bool isUnset(const char* code) { return code && !std::strcmp(code,"UNSET"); }
+
+// Numeric interoperability data, not upstream implementation. Meshtastic
+// 6d41e279f1f51bd59f687b9d441c1bf47b1594fc: MeshRadio.h and DisplayFormatters.cpp.
+// A preset changes modulation AND the default-name-derived frequency slot.
+struct ModemPreset {
+  const char* code;
+  const char* name;
+  double bandwidth_khz;
+  std::uint8_t sf, cr;
+  std::uint16_t preamble;
+};
+constexpr ModemPreset modemPresets[] = {
+  {"LONG_FAST", "LongFast", 250, 11, 5, 16},
+  {"LONG_TURBO", "LongTurbo", 500, 11, 8, 16},
+  {"LONG_MODERATE", "LongMod", 125, 11, 8, 16},
+  {"LONG_SLOW", "LongSlow", 125, 12, 8, 16},
+  {"MEDIUM_FAST", "MediumFast", 250, 9, 5, 16},
+  {"MEDIUM_SLOW", "MediumSlow", 250, 10, 5, 16},
+  {"SHORT_FAST", "ShortFast", 250, 7, 5, 16},
+  {"SHORT_SLOW", "ShortSlow", 250, 8, 5, 16},
+  {"SHORT_TURBO", "ShortTurbo", 500, 7, 5, 16}
+};
+constexpr std::size_t modemPresetCount=sizeof(modemPresets)/sizeof(modemPresets[0]);
+inline const ModemPreset* findModemPreset(const char* code) {
+  if(code)for(const auto& p:modemPresets)if(!std::strcmp(p.code,code))return &p;
+  return nullptr;
+}
+inline std::uint16_t slotCount(const Profile& region,const ModemPreset& modem) {
+  return static_cast<std::uint16_t>(std::floor(
+      (region.maximum_mhz-region.minimum_mhz+0.0000001)/(modem.bandwidth_khz/1000.0)));
+}
+inline std::uint32_t channelNameHash(const char* name) {
+  std::uint32_t hash=5381;
+  for(;name && *name;++name)hash=hash*33+static_cast<unsigned char>(*name);
+  return hash;
+}
+// Slot 0 selects the preset's default channel name. Reject an unavailable
+// preset/slot rather than silently clamping bandwidth or wrapping the slot.
+// Board-specific occupied-band validation remains selectable(output).
+inline bool makeProfile(const char* regionCode,const char* presetCode,
+                        std::uint16_t slot,Profile& output) {
+  const auto* region=find(regionCode);
+  const auto* modem=findModemPreset(presetCode);
+  if(!region || !modem)return false;
+  const auto slots=slotCount(*region,*modem);
+  if(!slots || slot>slots)return false;
+  const auto selected=slot?slot:std::uint16_t(1+channelNameHash(modem->name)%slots);
+  Profile candidate=*region;
+  candidate.bandwidth_khz=modem->bandwidth_khz;
+  candidate.sf=modem->sf;candidate.cr=modem->cr;candidate.preamble=modem->preamble;
+  candidate.frequency_slot=selected;
+  candidate.frequency_mhz=region->minimum_mhz+(selected-0.5)*modem->bandwidth_khz/1000.0;
+  if(!fitsHardware(candidate.frequency_mhz,candidate.bandwidth_khz,
+                   region->minimum_mhz,region->maximum_mhz))return false;
+  output=candidate;
+  return true;
+}
 } }

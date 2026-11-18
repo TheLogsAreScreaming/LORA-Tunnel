@@ -232,6 +232,15 @@ int armRadioReceive() {
   return state;
 }
 bool applyRadioProfile(const lora_scan::Snapshot& profile,bool initialize) {
+  // Stored snapshots use float MHz (up to 31 Hz rounding in this band).
+  // Config/preset validation retains its tighter double-precision bounds.
+  constexpr double snapshotTolerance=0.00005;
+  const auto* region=lora_profiles::find(config.region);
+  if(!region || !region->high_band_compatible ||
+     !lora_profiles::fitsHardware(profile.frequency_mhz,profile.bandwidth_khz,
+        lora_profiles::hardwareMinimum,lora_profiles::hardwareMaximum,snapshotTolerance) ||
+     !lora_profiles::fitsHardware(profile.frequency_mhz,profile.bandwidth_khz,
+        region->minimum_mhz,region->maximum_mhz,snapshotTolerance))return false;
   int state=initialize?radio.begin(profile.frequency_mhz,profile.bandwidth_khz,
       profile.sf,profile.cr,profile.sync_word,0,profile.preamble_symbols,
       board::LORA_TCXO_VOLTS,board::LORA_USE_LDO):radio.standby();

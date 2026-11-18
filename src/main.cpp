@@ -31,6 +31,7 @@ void IRAM_ATTR allocationFailed(size_t,uint32_t,const char*) {
   heapAllocationFailureSeen.store(1,std::memory_order_relaxed);
 }
 bool ready=false,stopping=false,hardwareReady=false;
+bool captureStorageFailed=false;
 bool startAfterUpload=false;
 enum class MessageOwner { Off, Pausing, Active, Restoring, Fault };
 MessageOwner messageOwner=MessageOwner::Off;
@@ -310,6 +311,7 @@ void requestSession() {
   sessionId=id;
   const CaptureMode mode=model.recon?CaptureMode::Recon:CaptureMode::Wardriver;
   if(!logSessionMarker(Kind::Start,mode,id)) return;
+  captureStorageFailed=false;
   memset(totals,0,sizeof(totals));
   meshDecoded=meshUnknown=0;
   reconTotal=0;
@@ -318,6 +320,17 @@ void requestSession() {
   startCapture(id,mode);
   serviceAlerts();
   scannersStart(); model.notice[0]=0;
+}
+void serviceCaptureStorage() {
+  if(storageReady()||(!capturing.load()&&!stopping))return;
+  const bool firstFailure=!captureStorageFailed;
+  captureStorageFailed=true;
+  const bool wasCapturing=capturing.load();
+  // The main task owns producer stop/drain and the retried Stop marker. The
+  // writer only marks storage unavailable; never run this lifecycle there.
+  if(wasCapturing)requestSession();
+  if(firstFailure||wasCapturing)
+    strlcpy(model.notice,"SD failed; stopping capture. Log incomplete",sizeof(model.notice));
 }
 void selectMode(bool recon) {
   if(model.recon==recon) return;
@@ -604,6 +617,10 @@ void serialStatus() {
       (unsigned long)chatEngine.send_queued,(unsigned long)chatEngine.announce_requests,(unsigned long)chatEngine.announce_queued,
       (unsigned long)chatEngine.rx_frames,(unsigned long)chatEngine.rx_text,(unsigned long)chatEngine.rx_nodes,
       (unsigned long)chatEngine.rx_receipts,(unsigned long)chatEngine.tx_ok,(unsigned long)chatEngine.tx_fail,(unsigned long)chatEngine.radio_failures);
+  const auto storage=loggerDiagnostics();
+  Serial.printf("LT STORAGE failures=%lu reason=%lu operation=%lu error=%ld capture_failed=%u\n",
+      (unsigned long)storage.failures,(unsigned long)storage.reason,(unsigned long)storage.operation,
+      (long)storage.error,unsigned(captureStorageFailed));
   Serial.printf("LT RADIO mode=%u protocol=%u frequency_khz=%lu bandwidth_hz=%lu sf=%u cr=%u sync=%u remaining_ms=%lu switches=%lu deferrals=%lu timeouts=%lu interruptions=%lu mt_listen_ms=%lu mc_listen_ms=%lu mt_rx=%lu mc_rx=%lu decoded=%lu other=%lu\n",
     unsigned(config.lora_mode),unsigned(radioMetrics.active.protocol),
     (unsigned long)(radioMetrics.active.frequency_mhz*1000.0f+0.5f),
@@ -807,7 +824,8 @@ void loop() {
   if(!hardwareReady) { serialCommands(); delay(10); return; }
   if(quietActive) { gnssTick(); serialCommands(); delay(5); return; }
   serviceAlerts();
-  gnssTick(); scannersTick(); drain(8); performActions(); serialCommands();serviceMessageOwner();
+  gnssTick(); serviceCaptureStorage(); scannersTick(); drain(8); performActions(); serialCommands();serviceMessageOwner();
+  serviceCaptureStorage();
   if(shutdownAfterMessages&&messageOwner==MessageOwner::Off){shutdownAfterMessages=false;callback(ui::Action::Shutdown,0,"");}
   serviceAlerts();
   if(quietActive) { delay(5); return; }
@@ -828,7 +846,8 @@ void loop() {
     }
     if(endQueued && loggerIdle()) {
       stopping=false; endQueued=false;
-      strlcpy(model.notice,storageReady()?"Session saved. Uploads run while idle.":"Storage error: inspect recovered log",sizeof(model.notice));
+      if(!storageReady())captureStorageFailed=true;
+      strlcpy(model.notice,captureStorageFailed?"Capture stopped: SD failed; log incomplete":"Session saved. Uploads run while idle.",sizeof(model.notice));
     }
   }
   static uint32_t lastBattery=0;

@@ -24,6 +24,7 @@ CHAT_ENGINE_FIELDS = ("starts", "stops", "tx_enable_requests", "tx_enabled", "tx
                       "rx_frames", "rx_text", "rx_nodes", "rx_receipts", "tx_ok", "tx_fail", "radio_failures")
 CHAT_ACTION_FIELDS = ("accepted", "dropped", "dequeued", "ignored_shutdown", "last_action",
                       "last_field", "owner_before", "owner_after")
+STORAGE_FIELDS = ("failures", "reason", "operation", "error", "capture_failed")
 
 
 def parse_chat_diagnostics(line, prefix, fields):
@@ -36,17 +37,28 @@ def parse_chat_diagnostics(line, prefix, fields):
         key, raw = token.split("=", 1)
         if key not in fields:
             continue
-        signed = key == "last_field"
+        signed = key in ("last_field", "error")
         if key in values or not re.fullmatch(r"-?[0-9]{1,10}" if signed else r"[0-9]{1,10}", raw):
             return None
         value = int(raw)
         lower, upper = (-2147483648, 2147483647) if signed else (0, 4294967295)
         if key in ("owner_before", "owner_after"):
             upper = 4
+        elif key == "reason":
+            upper = 7
+        elif key == "operation":
+            upper = 9
+        elif key == "capture_failed":
+            upper = 1
         if not lower <= value <= upper:
             return None
         values[key] = value
     return values if all(key in values for key in fields) else None
+
+
+def parse_storage(line):
+    """Allowlisted numeric failure breadcrumb; never expose paths or file data."""
+    return parse_chat_diagnostics(line, "LT STORAGE", STORAGE_FIELDS)
 
 
 def parse_chat(line):
@@ -259,9 +271,10 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
                         emit("LT CHAT " + " ".join(f"{key}={chat[key]}" for key in CHAT_FIELDS))
                     else:
                         omitted += 1
-                elif line.startswith(("LT CHAT_ENGINE ", "LT CHAT_ACTION ")):
+                elif line.startswith(("LT CHAT_ENGINE ", "LT CHAT_ACTION ", "LT STORAGE ")):
                     prefix, fields = (("LT CHAT_ENGINE", CHAT_ENGINE_FIELDS) if line.startswith("LT CHAT_ENGINE ")
-                                      else ("LT CHAT_ACTION", CHAT_ACTION_FIELDS))
+                                      else ("LT CHAT_ACTION", CHAT_ACTION_FIELDS) if line.startswith("LT CHAT_ACTION ")
+                                      else ("LT STORAGE", STORAGE_FIELDS))
                     diagnostic = parse_chat_diagnostics(line, prefix, fields)
                     if diagnostic is not None and latest is not None:
                         emit(prefix + " " + " ".join(f"{key}={diagnostic[key]}" for key in fields))

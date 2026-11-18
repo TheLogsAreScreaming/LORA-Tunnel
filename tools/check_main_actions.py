@@ -1,4 +1,4 @@
-"""Run the actual main-loop action callback/dispatcher against bounded host fakes.
+"""Run actual main-loop actions and capture-stop lifecycle against host fakes.
 
 Extracts those functions verbatim; no firmware build, SD, serial or RF access.
 """
@@ -28,7 +28,10 @@ def check():
     declarations = block(main, "enum class MessageOwner") + ";\n"
     declarations += block(main, "struct Action {") + ";\n"
     declarations += block(main, "struct ChatActionDiagnostics") + " chatActions;\n"
-    callbacks = block(main, "void callback(ui::Action") + "\n" + block(main, "void performActions()")
+    callbacks = "\n".join(block(main, marker) for marker in (
+        "void callback(ui::Action", "void requestSession()", "void serviceCaptureStorage()", "void performActions()"))
+    # Exercise the actual loop's Stop-marker retry/completion block as well.
+    callbacks += "\nvoid completeStopForTest(){\n" + block(main[main.index("void loop() {"):], "if(stopping)") + "\n}\n"
     fixture = (ROOT / "tests/main_action_host/main.cpp.in").read_text(encoding="utf-8")
     fixture = fixture.replace("// @MAIN_DECLARATIONS@", declarations).replace("// @MAIN_ACTIONS@", callbacks)
     cxx = compiler()

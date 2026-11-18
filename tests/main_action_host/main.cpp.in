@@ -12,6 +12,7 @@ size_t strlcpy(char* out,const char* text,size_t capacity){const auto n=std::str
 ui::Model model;
 MessageOwner messageOwner=MessageOwner::Off;
 bool shutdownPending=false,stopping=false,ready=true,startAfterUpload=false,shutdownAfterMessages=false,shutdownHadSession=false;
+bool captureStorageFailed=false,quietActive=false;
 std::atomic<bool> capturing{false};
 uint32_t shutdownErrors=0,shutdownDrops=0,shutdownAt=0;
 struct {std::atomic<uint32_t> storage_errors{0},log_drops{0};} counters;
@@ -27,8 +28,18 @@ int xQueueSend(int,const Action* action,int){if(pending.size()==4)return 0;pendi
 int xQueueReceive(int,Action* action,int){if(pending.empty())return 0;*action=pending.front();pending.pop_front();return pdTRUE;}
 uint32_t millis(){return 123456;}
 uint32_t messageUtc(){return 1800000000;}
-bool storageOk=true,cancelOk=true,radioStartOk=true,radioStopOk=true,saveOk=true;
-bool loggerIdle(){return true;}
+bool storageOk=true,cancelOk=true,radioStartOk=true,radioStopOk=true,saveOk=true,writerIdle=true,markerOk=true;
+bool failStorageAtStart=false;
+unsigned producerStops=0,scannerStops=0,drains=0,mountCalls=0,startMarkers=0,stopMarkers=0;
+enum class Kind {Wifi,Ble,Lora,Start,Stop};
+enum class CaptureMode {Wardriver,Recon};
+std::atomic<uint32_t> sessionId{0};
+std::atomic<CaptureMode> captureMode{CaptureMode::Wardriver};
+uint32_t totals[3]{},meshDecoded=0,meshUnknown=0,reconTotal=0,lastAlert=0;
+struct Summary {} summaries[1];
+struct {void reset(){}} alertHistory;
+bool alertHistoryNotice=false;
+bool loggerIdle(){return writerIdle;}
 bool uploaderBusy(){return false;}
 bool storageReady(){return storageOk;}
 bool scannersMessagesCancelTx(){return cancelOk;}
@@ -40,9 +51,18 @@ const char* defaultMessageChannel(){return "LongTurbo";}
 void uploaderConfigChanged(){}
 bool uploaderRequest(int){return false;}
 void uploaderCancel(){}
-void requestSession(){}
+void endCapture(){capturing=false;++producerStops;}
+void scannersStop(){++scannerStops;}
+void drain(unsigned=48){++drains;}
+bool scannersCaptureReady(){return true;}
+bool gnssControlPending(){return false;}
+uint32_t esp_random(){return 42;}
+bool logSessionMarker(Kind kind,CaptureMode,uint32_t){if(kind==Kind::Start){++startMarkers;if(failStorageAtStart)storageOk=false;}else ++stopMarkers;return markerOk;}
+void startCapture(uint32_t id,CaptureMode mode){sessionId=id;captureMode=mode;capturing=true;}
+void serviceAlerts(){}
+void scannersStart(){}
 void selectMode(bool){}
-bool mountStorage(){return true;}
+bool mountStorage(){++mountCalls;return true;}
 bool saveMessagingSetting(int,const char*){return saveOk;}
 bool saveAutoUpload(int,bool){return saveOk;}
 int savedMode=-1;
@@ -142,5 +162,39 @@ int main(){
   expect(chatActions.ignored_shutdown==1&&messaging::sendCalls==calls,"shutdown-discarded actions are counted and never sent");
   expect(chatActions.last_action==unsigned(ui::Action::SendMessage)&&chatActions.last_field==-1,"last action/field diagnostics describe the dequeued request without storing text");
   expect(chatActions.accepted==chatActions.dequeued&&chatActions.dropped==1&&pending.empty(),"lifetime queue counts reconcile after all actions including shutdown discard");
-  std::cout<<"Main action host: "<<checks<<" checks passed; real callback/dispatcher, bounded queue and owning messaging feedback verified.\n";
+
+  shutdownPending=false;model.notice[0]=0;storageOk=true;requestSession();
+  expect(capturing&&!stopping&&!captureStorageFailed&&startMarkers==1,"healthy capture starts through actual Start lifecycle");
+  serviceCaptureStorage();expect(capturing&&producerStops==0,"healthy storage never stops capture");
+  storageOk=false;writerIdle=false;serviceCaptureStorage();
+  expect(!capturing&&stopping&&captureStorageFailed&&producerStops==1&&scannerStops==1&&drains==1,"storage loss closes producer admission and drains through actual Stop lifecycle");
+  expect(notice("SD failed; stopping capture. Log incomplete"),"storage failure is explicit while queued records drain");
+  serviceCaptureStorage();expect(producerStops==1&&scannerStops==1,"latched storage loss never toggles stopped capture back on or retries producer stop");
+  markerOk=false;completeStopForTest();
+  expect(stopping&&stopMarkers==1,"full writer queue keeps bounded Stop marker retry pending");
+  markerOk=true;completeStopForTest();
+  expect(stopping&&stopMarkers==2,"accepted Stop marker waits for writer quiescence");
+  writerIdle=true;storageOk=true;completeStopForTest();
+  expect(!stopping&&captureStorageFailed&&notice("Capture stopped: SD failed; log incomplete"),"latched failure cannot become saved success even if storage recovers before stop completes");
+  execute(ui::Action::SaveCredential,0,"synthetic credential");serviceCaptureStorage();
+  expect(captureStorageFailed&&notice("Credential saved; see Uploads settings"),"latched failure does not hide meaningful unrelated action feedback");
+  storageOk=false;const auto starts=startMarkers;requestSession();
+  expect(!capturing&&startMarkers==starts&&captureStorageFailed,"missing storage cannot restart failed capture");
+
+  storageOk=true;failStorageAtStart=true;requestSession();failStorageAtStart=false;
+  expect(capturing&&!storageOk&&!captureStorageFailed,"fixture loses storage after accepted Start marker, before first capture loop");
+  serviceCaptureStorage();completeStopForTest();
+  expect(!capturing&&!stopping&&captureStorageFailed&&producerStops==2&&notice("Capture stopped: SD failed; log incomplete"),"asynchronous session-open failure is caught on first service pass and cannot claim saved");
+  storageOk=true;requestSession();
+  expect(capturing&&!captureStorageFailed,"explicit healthy new capture start clears only the capture failure latch");
+  requestSession();storageOk=false;serviceCaptureStorage();completeStopForTest();
+  expect(!capturing&&!stopping&&captureStorageFailed&&notice("Capture stopped: SD failed; log incomplete"),"storage failure during user-requested Stop remains incomplete at completion");
+
+  captureStorageFailed=false;strlcpy(model.notice,"Unrelated existing notice",64);const auto stopped=producerStops;
+  serviceCaptureStorage();completeStopForTest();
+  expect(!captureStorageFailed&&producerStops==stopped&&notice("Unrelated existing notice"),"already stopped device without storage is not relabeled as failed capture");
+  execute(ui::Action::StartMessages,1);serviceCaptureStorage();
+  expect(messageOwner==MessageOwner::Active&&messaging::live.active&&!captureStorageFailed&&producerStops==stopped,"receive-only Messages is unaffected by unavailable SD when capture is stopped");
+  expect(mountCalls==0,"failure handling never remounts or loops storage retries");
+  std::cout<<"Main action host: "<<checks<<" checks passed; real action queue, messaging feedback and storage-failure capture stop verified.\n";
 }

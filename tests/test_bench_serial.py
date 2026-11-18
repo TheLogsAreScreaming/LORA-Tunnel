@@ -154,7 +154,8 @@ class BenchSerialTests(unittest.TestCase):
 
     def test_chat_diagnostics_are_numeric_complete_and_filter_private_fields(self):
         for prefix, fields in (("LT CHAT_ENGINE", bench.CHAT_ENGINE_FIELDS),
-                               ("LT CHAT_ACTION", bench.CHAT_ACTION_FIELDS)):
+                               ("LT CHAT_ACTION", bench.CHAT_ACTION_FIELDS),
+                               ("LT STORAGE", bench.STORAGE_FIELDS)):
             values = dict.fromkeys(fields, 0)
             if "last_field" in values:
                 values["last_field"] = -1
@@ -173,6 +174,24 @@ class BenchSerialTests(unittest.TestCase):
             result, _, output = self.exercise(responder=lambda *_, line=line: (line + "\n").encode())
             self.assertNotEqual(result, 0)
             self.assertNotIn(prefix, output)
+
+    def test_storage_diagnostics_are_bounded_and_have_no_paths(self):
+        prefix, fields = "LT STORAGE", bench.STORAGE_FIELDS
+        base = "LT STORAGE failures=1 reason=5 operation=5 error=28 capture_failed=1"
+        self.assertEqual(bench.parse_chat_diagnostics(base, prefix, fields),
+                         dict(failures=1, reason=5, operation=5, error=28, capture_failed=1))
+        self.assertEqual(bench.parse_storage(base), bench.parse_chat_diagnostics(base, prefix, fields))
+        self.assertEqual(bench.parse_chat_diagnostics(base.replace("error=28", "error=-1"), prefix, fields)["error"], -1)
+        for before, after in (("reason=5", "reason=8"), ("operation=5", "operation=10"),
+                              ("capture_failed=1", "capture_failed=2"), ("error=28", "error=2147483648"),
+                              ("error=28", "error=-2147483649"), ("error=28", "error=PRIVATE_PATH")):
+            self.assertIsNone(bench.parse_chat_diagnostics(base.replace(before, after), prefix, fields))
+        result, _, output = self.exercise(responder=lambda *_: status() +
+            (base + " path=PRIVATE_PATH key=PRIVATE_KEY\n").encode())
+        self.assertEqual(result, 0)
+        self.assertIn(base, output)
+        self.assertNotIn("PRIVATE_PATH", output)
+        self.assertNotIn("PRIVATE_KEY", output)
 
     def test_chat_command_requires_matching_fresh_owner_protocol_and_tx_off(self):
         def reply(owner=2, active=1, tx=0, protocol=1):

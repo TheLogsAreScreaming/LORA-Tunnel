@@ -8,7 +8,10 @@ from check_cardputer_ui import ROOT, compiler
 
 def check():
     logger = (ROOT / "src/logger.cpp").read_text(encoding="utf-8")
-    actual = logger[logger.index("void fault()"):logger.index("void hex(")]
+    actual = logger[logger.index("portMUX_TYPE diagnosticsMux="):logger.index("void hex(")]
+    actual += logger[logger.index("bool mountStorage() {"):logger.index("bool storageReady()")]
+    header = (ROOT / "include/logger.h").read_text(encoding="utf-8")
+    types = header[header.index("enum class LoggerFailureReason"):header.index("bool mountStorage();")]
     helper = (ROOT / "src/checked_sd_file.cpp").read_text(encoding="utf-8")
     native_open = helper[helper.index("FILE* nativeOpen("):helper.index("int nativeSync(")]
     # Test the actual descriptor-to-stream cleanup branch without touching a
@@ -17,10 +20,10 @@ def check():
                           ("::open", "fdOpenFake"), ("::close", "fdCloseFake")):
         native_open = native_open.replace(before, after)
     fixture = (ROOT / "tests/storage_host/check.cpp").read_text(encoding="utf-8")
-    for marker in ("// LOGGER_IO_IMPLEMENTATION", "// NATIVE_OPEN_IMPLEMENTATION"):
+    for marker in ("// LOGGER_IO_IMPLEMENTATION", "// LOGGER_DIAGNOSTIC_TYPES", "// NATIVE_OPEN_IMPLEMENTATION"):
         if fixture.count(marker) != 1:
             raise RuntimeError("Invalid checked-SD fixture marker")
-    fixture = fixture.replace("// LOGGER_IO_IMPLEMENTATION", actual).replace("// NATIVE_OPEN_IMPLEMENTATION", native_open)
+    fixture = fixture.replace("// LOGGER_IO_IMPLEMENTATION", actual).replace("// LOGGER_DIAGNOSTIC_TYPES", types).replace("// NATIVE_OPEN_IMPLEMENTATION", native_open)
     cxx = compiler()
     environment = os.environ.copy()
     environment["PATH"] = str(Path(cxx).parent) + os.pathsep + environment.get("PATH", "")

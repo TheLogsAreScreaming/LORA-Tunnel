@@ -49,7 +49,24 @@ StaticJsonDocument<4096> record;
 StaticJsonDocument<8192> record;
 #endif
 
-void fault() {
+// The writer publishes from core 0 while UI/serial reads from the main task.
+// Keep this lock limited to numeric copies; it never includes file/bus work.
+portMUX_TYPE diagnosticsMux=portMUX_INITIALIZER_UNLOCKED;
+LoggerDiagnostics failureDiagnostics;
+void noteFailure(LoggerFailureReason reason,storage::Failure operation=storage::Failure::None,int error=0) {
+  portENTER_CRITICAL(&diagnosticsMux);
+  if(!failureDiagnostics.failures){
+    failureDiagnostics.reason=uint32_t(reason);
+    failureDiagnostics.operation=uint32_t(operation);
+    failureDiagnostics.error=error;
+  }
+  if(failureDiagnostics.failures!=UINT32_MAX)++failureDiagnostics.failures;
+  portEXIT_CRITICAL(&diagnosticsMux);
+}
+void fault(LoggerFailureReason reason) {
+  // Capture before cleanup; close may fail too and must not replace the first
+  // write/flush/sync error retained by CheckedFile.
+  noteFailure(reason,sessionFile.failure(),sessionFile.error());
   ++counters.storage_errors;
   counters.log_drops.fetch_add(bufferedRecords);
   bufferedRecords=0;
@@ -65,14 +82,14 @@ void flush() {
     const size_t amount=std::min(used-offset,board::LORA_SHARED_WITH_SD ? size_t(512) : used);
     xSemaphoreTake(busMutex,portMAX_DELAY);
     const size_t written=sessionFile.write(reinterpret_cast<const uint8_t*>(buffer)+offset,amount);
-    if(written!=amount || sessionFile.failed()) { fault(); xSemaphoreGive(busMutex); return; }
+    if(written!=amount || sessionFile.failed()) { fault(LoggerFailureReason::BatchWrite); xSemaphoreGive(busMutex); return; }
     xSemaphoreGive(busMutex);
     offset+=amount;
     // Release the shared cap SPI bus between SD blocks for RX FIFO/rearm.
     if(board::LORA_SHARED_WITH_SD) vTaskDelay(1);
   }
   xSemaphoreTake(busMutex,portMAX_DELAY);
-  if(!sessionFile.flush()) { fault(); xSemaphoreGive(busMutex); return; }
+  if(!sessionFile.flush()) { fault(LoggerFailureReason::BatchFlush); xSemaphoreGive(busMutex); return; }
   xSemaphoreGive(busMutex);
   used=0; bufferedRecords=0;
   const uint32_t elapsed=millis()-started;
@@ -81,7 +98,7 @@ void flush() {
 void closeSession() {
   // close() also checks its final flush/sync and fclose return. A preceding
   // successful batch flush never makes a failed close a successful save.
-  if(sessionFile && !sessionFile.close()) fault();
+  if(sessionFile && !sessionFile.close()) fault(LoggerFailureReason::SessionClose);
 }
 void beginSession(const Observation& event) {
   flush();
@@ -92,7 +109,7 @@ void beginSession(const Observation& event) {
     char path[64];snprintf(path,sizeof(path),"/sessions/LT-%08lx.jsonl",(unsigned long)event.session);
     // Exclusive create prevents collisions without an extra open/exists
     // stream. The existing 8 KiB batch makes a second stdio buffer redundant.
-    if(!sessionFile.open(path,storage::OpenMode::Exclusive)) fault();
+    if(!sessionFile.open(path,storage::OpenMode::Exclusive)) fault(LoggerFailureReason::SessionOpen);
   }
   xSemaphoreGive(busMutex);
 }
@@ -337,9 +354,19 @@ bool mountStorage() {
   // Call only before tasks start, or while stopped and loggerIdle().
   SD.end();
   const bool ok=SD.begin(board::SD_CS,hw::peripheralSpi(),board::SD_SPI_HZ,"/sd",SD_FILE_SLOTS);
-  mounted=ok && SD.cardType()!=CARD_NONE && SD.mkdir("/sessions");
+  mounted=false;
+  if(!ok)noteFailure(LoggerFailureReason::Mount);
+  else if(SD.cardType()==CARD_NONE)noteFailure(LoggerFailureReason::MissingCard);
+  else if(!SD.mkdir("/sessions"))noteFailure(LoggerFailureReason::SessionsDirectory);
+  else mounted=true;
   if (!mounted) ++counters.storage_errors;
   return mounted;
+}
+LoggerDiagnostics loggerDiagnostics() {
+  portENTER_CRITICAL(&diagnosticsMux);
+  const auto snapshot=failureDiagnostics;
+  portEXIT_CRITICAL(&diagnosticsMux);
+  return snapshot;
 }
 bool storageReady() { return mounted; }
 uint32_t loggerStackMargin() { return writerTask ? uxTaskGetStackHighWaterMark(writerTask) : 0; }

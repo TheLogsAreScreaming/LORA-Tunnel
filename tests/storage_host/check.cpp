@@ -18,12 +18,12 @@ struct Node {std::string bytes;bool directory=false;};
 struct Handle {Node* node;size_t pos=0;bool error=false,closed=false,writable=false;int fd;};
 std::map<std::string,Node> nodes;
 std::vector<std::unique_ptr<Handle>> handles;
-bool requireLock=false,busHeld=false;
+bool requireLock=false,busHeld=false,diagnosticsHeld=false;
 bool failOpen=false,failBuffer=false,failRead=false,failFlush=false,failSync=false,failClose=false;
 bool shortWrite=false,fullWriteError=false,failStat=false,failFileStat=false,failDescriptor=false;
 unsigned active=0,peak=0,opens=0,closes=0,flushes=0,syncs=0,writes=0,statCalls=0;
 size_t largestWrite=0;int bufferMode=-1;void* bufferAddress=nullptr;size_t bufferBytes=0;
-void lockCheck() {if(requireLock)check(busHeld,"I/O outside bus mutex");}
+void lockCheck() {check(!diagnosticsHeld,"file I/O inside diagnostic critical section");if(requireLock)check(busHeld,"I/O outside bus mutex");}
 Handle& handle(FILE* file) {auto* h=reinterpret_cast<Handle*>(file);check(h&&!h->closed,"use after close");return *h;}
 FILE* open(const char* path,OpenMode mode) {
   lockCheck();++opens;
@@ -78,6 +78,7 @@ void run(){
 }
 }
 namespace board {
+constexpr int SD_CS=1,SD_SPI_HZ=1000000;
 #if defined(LORA_TUNNEL_CARDPUTER_ADV)
 constexpr bool LORA_SHARED_WITH_SD=true;
 #else
@@ -85,10 +86,23 @@ constexpr bool LORA_SHARED_WITH_SD=false;
 #endif
 }
 namespace tunnel {
+// LOGGER_DIAGNOSTIC_TYPES
 struct Observation {uint32_t session;};
 struct Counters {std::atomic<uint32_t> storage_errors{0},log_drops{0},flush_max_ms{0};} counters;
 constexpr int portMAX_DELAY=0;int busMutex=1;
 unsigned yieldCalls=0;uint32_t tick=0;
+using portMUX_TYPE=int;
+constexpr int portMUX_INITIALIZER_UNLOCKED=0,SD_FILE_SLOTS=2,CARD_NONE=0;
+void portENTER_CRITICAL(portMUX_TYPE*){check(!fake::diagnosticsHeld,"recursive diagnostic lock");fake::diagnosticsHeld=true;}
+void portEXIT_CRITICAL(portMUX_TYPE*){check(fake::diagnosticsHeld,"diagnostic unlock without lock");fake::diagnosticsHeld=false;}
+namespace hw {int peripheralSpi(){return 0;}}
+struct FakeSd {
+  bool beginOK=true,directoryOK=true;int type=1;
+  void end(){check(!fake::diagnosticsHeld,"unmount inside diagnostic lock");}
+  bool begin(int,int,int,const char*,int){check(!fake::diagnosticsHeld,"mount inside diagnostic lock");return beginOK;}
+  int cardType(){return type;}
+  bool mkdir(const char*){return directoryOK;}
+} SD;
 uint32_t millis(){return ++tick;}
 void xSemaphoreTake(int,int){check(!fake::busHeld,"recursive bus lock");fake::busHeld=true;}
 void xSemaphoreGive(int){check(fake::busHeld,"unlock without lock");fake::busHeld=false;}
@@ -96,19 +110,52 @@ void vTaskDelay(int){check(!fake::busHeld,"yield while holding SPI lock");++yiel
 std::atomic<bool> mounted{true},openSession{false};storage::CheckedFile sessionFile;
 uint32_t sequence=0,fileSession=0,bufferedRecords=0;char buffer[8192];size_t used=0;
 // LOGGER_IO_IMPLEMENTATION
-void reset(){fake::busHeld=true;sessionFile.close();fake::busHeld=false;fake::reset();fake::requireLock=true;mounted=true;openSession=false;used=bufferedRecords=0;counters.storage_errors=0;counters.log_drops=0;counters.flush_max_ms=0;yieldCalls=tick=0;}
+void reset(){fake::busHeld=true;sessionFile.close();fake::busHeld=false;fake::reset();fake::requireLock=true;mounted=true;openSession=false;used=bufferedRecords=0;counters.storage_errors=0;counters.log_drops=0;counters.flush_max_ms=0;yieldCalls=tick=0;failureDiagnostics=LoggerDiagnostics{};SD=FakeSd{};}
+void diagnostic(LoggerFailureReason reason,Failure operation,int error,uint32_t failures=1){
+ const auto value=loggerDiagnostics();check(value.failures==failures,"logger failure count");
+ check(value.reason==uint32_t(reason)&&value.operation==uint32_t(operation)&&value.error==error,"numeric first logger failure matches exact operation and errno");
+ check(!fake::diagnosticsHeld,"diagnostic snapshot releases lock");
+}
 void start(){Observation e{0x12345678};beginSession(e);check(sessionFile&&mounted&&openSession,"session starts");check(fake::bufferMode==_IONBF&&fake::bufferBytes==0,"logger has no stdio buffer allocation");check(fake::opens==1&&fake::statCalls==0,"exclusive creation has one handle and no exists-open");}
 void batch(){std::memset(buffer,'x',1200);used=1200;bufferedRecords=3;}
 void run(){
  reset();start();batch();flush();check(!counters.storage_errors&&!counters.log_drops&&used==0&&bufferedRecords==0,"batch success accounting");
  check(fake::largestWrite==(board::LORA_SHARED_WITH_SD?512:1200),"target write chunk unchanged");check(yieldCalls==(board::LORA_SHARED_WITH_SD?3:0),"shared SPI yield count");
  endSession();check(!sessionFile&&!openSession&&mounted&&fake::active==0,"stop closes and idles");
- for(int failure=0;failure<4;++failure){reset();start();batch();fake::shortWrite=failure==0;fake::fullWriteError=failure==1;fake::failFlush=failure==2;fake::failSync=failure==3;flush();check(counters.storage_errors==1&&counters.log_drops==3,"failed batch conservatively drops all pending records once");check(!mounted&&!sessionFile&&used==0&&bufferedRecords==0&&fake::active==0,"failed batch closes and marks storage unavailable");endSession();check(!openSession&&counters.storage_errors==1,"stop after fault does not duplicate fault");}
+ for(int failure=0;failure<5;++failure){reset();start();batch();fake::shortWrite=failure==0;fake::fullWriteError=failure==1;fake::failFlush=failure==2;fake::failSync=failure==3;fake::failDescriptor=failure==4;flush();check(counters.storage_errors==1&&counters.log_drops==3,"failed batch conservatively drops all pending records once");check(!mounted&&!sessionFile&&used==0&&bufferedRecords==0&&fake::active==0,"failed batch closes and marks storage unavailable");endSession();check(!openSession&&counters.storage_errors==1,"stop after fault does not duplicate fault");
+  diagnostic(failure<2?LoggerFailureReason::BatchWrite:LoggerFailureReason::BatchFlush,failure<2?Failure::Write:failure==2?Failure::Flush:Failure::Sync,failure<3?ENOSPC:failure==3?EIO:EBADF);
+ }
  reset();start();batch();flush();fake::failClose=true;endSession();check(counters.storage_errors==1&&!mounted&&!openSession&&!sessionFile&&fake::active==0,"close-only failure cannot report healthy saved storage");check(counters.log_drops==0,"successful sync is not fabricated record loss");
+ diagnostic(LoggerFailureReason::SessionClose,Failure::Close,EIO);
  reset();start();fake::failSync=true;endSession();check(counters.storage_errors==1&&!mounted&&fake::active==0,"empty final close checks sync");
+ diagnostic(LoggerFailureReason::SessionClose,Failure::Sync,EIO);
  reset();fake::nodes["/sd/sessions/LT-12345678.jsonl"].bytes="old";Observation event{0x12345678};beginSession(event);check(!sessionFile&&!mounted&&counters.storage_errors==1,"collision faults");check(fake::nodes.begin()->second.bytes=="old","collision cannot truncate existing session");endSession();
+ diagnostic(LoggerFailureReason::SessionOpen,Failure::Open,EEXIST);
  reset();fake::failOpen=true;beginSession(event);check(!sessionFile&&!mounted&&counters.storage_errors==1&&fake::active==0,"open failure is visible without leak");endSession();
+ diagnostic(LoggerFailureReason::SessionOpen,Failure::Open,EIO);
+ reset();fake::failBuffer=true;beginSession(event);check(!sessionFile&&!mounted&&fake::active==0,"logger buffer setup failure closes file");endSession();
+ diagnostic(LoggerFailureReason::SessionOpen,Failure::Buffer,ENOMEM);
  reset();start();batch();fake::failClose=true;Observation next{0x12345679};beginSession(next);check(!mounted&&!sessionFile&&counters.storage_errors==1&&fake::opens==1,"failed previous close prevents new session file");endSession();reset();fake::requireLock=false;
+ // The first cause survives cleanup errors, successful remount, a new session,
+ // another failure and repeated reads; only a boot/test reset clears it.
+ reset();start();batch();fake::shortWrite=fake::failClose=true;flush();endSession();
+ diagnostic(LoggerFailureReason::BatchWrite,Failure::Write,ENOSPC);
+ fake::shortWrite=fake::failClose=false;check(mountStorage(),"remount succeeds after failed capture");
+ diagnostic(LoggerFailureReason::BatchWrite,Failure::Write,ENOSPC);
+ beginSession(next);check(sessionFile&&mounted,"new session opens after recovery");batch();fake::failSync=true;flush();endSession();
+ diagnostic(LoggerFailureReason::BatchWrite,Failure::Write,ENOSPC,2);
+ diagnostic(LoggerFailureReason::BatchWrite,Failure::Write,ENOSPC,2);
+ for(unsigned phase=0;phase<3;++phase){
+  reset();errno=EACCES;SD.beginOK=phase!=0;SD.type=phase==1?CARD_NONE:1;SD.directoryOK=phase!=2;
+  check(!mountStorage()&&counters.storage_errors==1,"mount-stage failure visible");
+  const auto reason=phase==0?LoggerFailureReason::Mount:phase==1?LoggerFailureReason::MissingCard:LoggerFailureReason::SessionsDirectory;
+  diagnostic(reason,Failure::None,0); // stale libc errno is not evidence from Arduino SD APIs
+  SD=FakeSd{};check(mountStorage(),"successful remount restores storage");diagnostic(reason,Failure::None,0);
+ }
+ reset();diagnostic(LoggerFailureReason::None,Failure::None,0,0);check(mountStorage(),"healthy mount");diagnostic(LoggerFailureReason::None,Failure::None,0,0);
+ failureDiagnostics={UINT32_MAX,uint32_t(LoggerFailureReason::BatchWrite),uint32_t(Failure::Write),ENOSPC};SD.beginOK=false;
+ check(!mountStorage(),"failure at saturated count");diagnostic(LoggerFailureReason::BatchWrite,Failure::Write,ENOSPC,UINT32_MAX);
+ reset();fake::requireLock=false;
 }
 }
 void helperTests(){

@@ -1,6 +1,6 @@
 # Cardputer ADV + Cap LoRa-1262
 
-LORA Tunnel **0.5.0** supports **M5Stack Cardputer ADV with Cap LoRa-1262 (U214)** through the dedicated `cardputer-adv-lora1262` build. It includes Meshtastic, MeshCore and combined receive modes. See the [current release record](RELEASE_0_5_0.md), [mesh guide](COMBINED_MESH.md) and [earlier Cardputer validation](CARDPUTER_SOFTWARE_VALIDATION.md).
+LORA Tunnel **0.6.0** supports **M5Stack Cardputer ADV with Cap LoRa-1262 (U214)** through the dedicated `cardputer-adv-lora1262` build. It includes configurable Meshtastic presets such as LongTurbo, MeshCore and combined receive modes, and separate channel/private [Messages](MESSAGING.md). See the [current release record](RELEASE_0_6_0.md), [mesh guide](COMBINED_MESH.md) and [earlier Cardputer validation](CARDPUTER_SOFTWARE_VALIDATION.md). The 0.6.0 messaging build has not received a separate instrumented Cardputer hardware acceptance run.
 
 The target uses ESP32-S3, **8 MB flash, no PSRAM**, the 240 × 135 landscape
 display, ADV keyboard, microSD, speaker and battery support. U214 supplies
@@ -106,7 +106,7 @@ be recorded with physical acceptance; host checks alone do not certify it.
 
 ```sh
 python -m platformio run -e cardputer-adv-lora1262
-python tools/package_cardputer.py --build .pio/build/cardputer-adv-lora1262 --output dist/cardputer-check --version 0.5.0
+python tools/package_cardputer.py --build .pio/build/cardputer-adv-lora1262 --output dist/cardputer-check --version 0.6.0
 ```
 
 The pinned default_8MB partition table gives app0/app1 **0x330000 bytes each**.

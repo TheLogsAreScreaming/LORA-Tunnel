@@ -1,20 +1,22 @@
 # LORA Tunnel
 
-**Development 0.6.0-dev · Published release 0.5.0 · MIT open source**
+**LORA Tunnel 0.6.0 · MIT open source**
 
-LORA Tunnel turns a supported handheld into a standalone Wi-Fi, Bluetooth Low Energy and LoRa wardriving recorder. It captures radio observations, adds receiver time and location when GNSS provides them, and saves sessions to microSD for later review and export. A separate Recon mode groups supported Wi-Fi/BLE indicators and provides optional audible alerts.
+LORA Tunnel turns a supported handheld into a standalone Wi-Fi, Bluetooth Low Energy and LoRa wardriving recorder. It captures radio observations, adds receiver time and location when GNSS provides them, and saves sessions to microSD for later review and export. A separate Recon mode groups supported Wi-Fi/BLE indicators and provides optional audible alerts. The Messages mode provides Meshtastic and MeshCore channel and private messaging when capture is stopped.
 
 The firmware runs on **Heltec WiFi LoRa 32 Expansion Kit V2 / V4-R8** and **M5Stack Cardputer ADV with Cap LoRa-1262 (U214)**. Each board has its own binary. Capture runs on the handheld without a laptop, phone or Kismet server.
 
-[Install with the web flasher](https://valleytech-lora-tunnel.pages.dev/) · [Download 0.5.0](https://github.com/valleytechsolutions/LORA-Tunnel/releases/tag/v0.5.0) · [Project website](https://valleytechsolutions.tech/pages/lora-tunnel) · [Gitea distribution](https://git.churchofmalware.org/Valleytech/LORA-Tunnel)
+[Install with the web flasher](https://valleytech-lora-tunnel.pages.dev/) · [Download 0.6.0](https://github.com/valleytechsolutions/LORA-Tunnel/releases/tag/v0.6.0) · [Project website](https://valleytechsolutions.tech/pages/lora-tunnel) · [Gitea distribution](https://git.churchofmalware.org/Valleytech/LORA-Tunnel)
 
-## What changed in 0.5.0
+## What changed in 0.6.0
 
-Wardriver can now listen to **Meshtastic**, **MeshCore**, or alternate between both. Meshtastic decoding includes supported node information, positions, ordinary text and device battery/voltage telemetry. MeshCore decoding includes public node announcements and Ed25519 signature verification. Every LoRa observation retains its raw bytes and the radio settings used to receive it.
+Choose **LongTurbo** or another supported Meshtastic preset, select an automatic or explicit frequency slot, and configure the MeshCore receive profile under **Settings → Mesh radio / decode settings**. Wardriver can stay on Meshtastic, stay on MeshCore, or alternate between both. Known-key MeshCore group-text decoding joins the existing Meshtastic payload decoder and signed MeshCore public-announcement decoder. Raw received bytes and receive-time radio settings remain in the log.
 
-Combined mode uses one selected profile per protocol and a default 30-second dwell. The SX1262 receives one configuration at a time; it cannot monitor both protocols simultaneously or hear traffic on every preset. Existing configurations remain Meshtastic-only until the user changes the mode. [Supported fields, settings and limits](docs/COMBINED_MESH.md) · [Release notes](docs/RELEASE_0_5_0.md).
+**Home → Messages** adds channel messages, private conversations, identity announcements, public-key review and receipt status for both protocols. Transmission starts OFF and requires confirmation. Messages uses one protocol at a time and pauses Wi-Fi/BLE/LoRa capture. The physical keyboard on Cardputer and touchscreen keyboard on Heltec support message and credential entry. [Messaging controls and compatibility](docs/MESSAGING.md).
 
-The current development branch adds **Long Turbo and the other Meshtastic modem presets**, explicit/default frequency slots, and receive-only **MeshCore group-text decoding** with Public or configured keys. These changes are not yet represented by the linked 0.5.0 release binaries. Their physical acceptance is pending. See the [current receive settings and decoder limits](docs/COMBINED_MESH.md).
+This release also repairs Heltec touch-report handling and command feedback, binds contact-trust confirmation to the reviewed public key, distinguishes different MeshCore group messages sharing a name/time, and automatically stops capture when storage fails. Separate Launcher application images are supplied for **both boards**. [Release notes and validation limits](docs/RELEASE_0_6_0.md) · [Receive settings and decoder scope](docs/COMBINED_MESH.md).
+
+Combined wardriving uses one selected profile per protocol and a default 30-second dwell. The single SX1262 cannot receive both profiles simultaneously or monitor every preset. Existing configurations remain Meshtastic-only until the user changes the mode.
 
 ## Supported hardware
 
@@ -32,8 +34,9 @@ The Heltec V1, low-band Heltec kits, original Cardputer and other M5Stack caps a
 | Wi-Fi | Passive 2.4 GHz AP observations with BSSID, available SSID, channel, RSSI and security metadata. Current Wi-Fi scan channels are 1–11. |
 | BLE | Passive advertisements with address type, RSSI, available name and service/manufacturer data. Random addresses are not permanent device identities. |
 | LoRa | Receive-only Meshtastic/MeshCore profiles, local supported-payload decoding, RSSI/SNR, raw bytes, per-packet profile snapshots and slow switching. |
+| Messages | Separate Meshtastic/MeshCore channel and private messaging, explicit TX permission, public-key trust review and differentiated delivery receipts. |
 | GNSS | Receiver UTC, fix validity, age and available quality information. Missing or stale coordinates remain explicit. Mesh-advertised positions are separate. |
-| Storage | Versioned JSONL sessions with bounded queues, checked buffered writes and visible drop/error counters. Repeated sightings remain in the log. |
+| Storage | Versioned JSONL sessions with bounded queues, checked buffered writes and visible drop/error counters. A storage failure stops capture and marks the log incomplete. |
 | Recon | Separate passive Wi-Fi/BLE evidence views, category filters, optional SD rules and once-per-device-per-session alerts. LoRa stops in Recon. |
 | Export/upload | Local WiGLE CSV export and optional idle-only WiGLE, Wardrift and WDGWars CSV uploads. Mesh export has a separate, limited contract. |
 
@@ -53,16 +56,16 @@ These interface previews are rendered from the drawing code with synthetic data.
 
 1. Identify the exact board and retain its current recovery image. Read the [Heltec recovery procedure](docs/RECOVERY.md) or [Cardputer installation guide](docs/CARDPUTER_ADV.md).
 2. Prepare a FAT32 microSD card with the supplied `lora-tunnel` folder. Copy `config.example.json` to `config.json` **on the card**. Keep an existing private configuration when updating; the release starter contains empty credentials. [SD setup](sdcard/README.md).
-3. Select the matching board in the [web flasher](https://valleytech-lora-tunnel.pages.dev/). Factory images are merged binaries for USB installation at `0x0`. A Cardputer factory install replaces Launcher.
-4. To retain Bmorcelli Launcher, download the separate [Cardputer Launcher application](https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/v0.5.0/LORA-Tunnel-0.5.0-Cardputer-ADV-LoRa1262-LAUNCHER-APP.bin) and install it through Launcher's SD menu. Never flash an application-only BIN at `0x0`.
-5. On first boot, select the LoRa region for your location or choose **Skip LoRa**. LoRa remains off until a supported region is selected. In the development build, stop capture and open **Settings → Mesh radio / decode settings** to choose the protocol mode, Meshtastic preset/slot, MeshCore profile, dwell and public decoding. Published 0.5.0 uses the older Settings → LoRa mode cycle.
+3. Select the matching board in the [web flasher](https://valleytech-lora-tunnel.pages.dev/). Factory images are merged binaries for USB installation at `0x0`; installing one replaces Launcher and the existing boot layout.
+4. To retain Bmorcelli Launcher, use the separate [Heltec Launcher application](https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/v0.6.0/LORA-Tunnel-0.6.0-Heltec-V4-R8-TFT-HIGH-BAND-LAUNCHER-APP.bin) or [Cardputer Launcher application](https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/v0.6.0/LORA-Tunnel-0.6.0-Cardputer-ADV-LoRa1262-LAUNCHER-APP.bin). Install through Launcher's SD menu and let Launcher choose the destination. Never flash an application-only BIN at `0x0`.
+5. On first boot, select the LoRa region for your location or choose **Skip LoRa**. LoRa remains off until a supported region is selected. Stop capture and open **Settings → Mesh radio / decode settings** to choose protocol mode, Meshtastic preset/slot, MeshCore profile, dwell and public decoding.
 6. Open Wardriver and start a session. Check storage and GPS status. Use **Stop + Save** and wait for saving to finish before removing power or the card. Native sessions are stored under `/sessions/`.
 
 Heltec uses touch controls, with optional physical navigation buttons. Cardputer uses its keyboard. Software shutdown saves before sleep; wake controls differ by board. [User guide](docs/USER_GUIDE.md) · [Web flasher guide](docs/WEB_FLASHER.md) · [Cardputer controls](docs/CARDPUTER_ADV.md).
 
 ## Configuration and uploads
 
-The SD configuration holds radio mode, modem preset, slot, dwell time, region, detection preferences and optional credentials. The default MeshCore profile is a regional starting point, not automatic discovery of the local network. Match the protocol, frequency, bandwidth and spreading factor to the network being observed. The development build accepts up to four Meshtastic channel keys and four MeshCore group keys configured privately; unknown or unsupported encrypted payloads remain recorded as such. Preset and key settings require a working SD configuration; region-only NVS recovery returns to that region's LongFast starting profile.
+The SD configuration holds radio mode, modem preset, slot, dwell time, region, detection preferences and optional credentials. The default MeshCore profile is a regional starting point, not automatic discovery of the local network. Match the protocol, frequency, bandwidth and spreading factor to the network being observed. Passive decoding accepts up to four Meshtastic channel keys and four MeshCore group keys configured privately; unknown or unsupported encrypted payloads remain recorded as such. Messages has its own channel/key settings. Preset and key settings require a working SD configuration; region-only NVS recovery returns to that region's LongFast starting profile.
 
 WiGLE, Wardrift and WDGWars uploads are opt-in and run only while capture is stopped and saved. Automatic uploads are off by default. Configure home Wi-Fi and the credentials for the chosen service; starting capture interrupts upload work. The Heltec provides an on-screen credential keyboard and the Cardputer uses its physical keyboard. Credentials are plaintext on the removable card and must stay out of source control and shared logs. [Upload setup and eligibility](docs/UPLOADS.md).
 
@@ -80,13 +83,13 @@ python -m platformio run -e cardputer-adv-lora1262
 
 Select the actual USB port before upload. Keep firmware, partition table and bootloader from the same build. The Heltec test unit requires the documented [esptool 5.4.0 legacy-stub fallback](docs/RECOVERY.md#legacy-stub-installation-fallback) when the default loader fails. A successful build is distinct from a verified flash and a successful radio capture.
 
-Release downloads include board-specific factory images, the Cardputer Launcher app, source, separate dependency/relinking archives, an SD starter and SHA-256 checksums. [Rebuild and licensing materials](docs/RELINKING.md).
+Release downloads include factory and Launcher application images for both boards, source, separate dependency/relinking archives, an SD starter and SHA-256 checksums. [Rebuild and licensing materials](docs/RELINKING.md).
 
 ## Validation and current limits
 
-The [release record](docs/RELEASE_0_5_0.md) separates source tests, build/image checks, device observations and unverified behavior. The [combined mesh record](docs/COMBINED_MESH_VALIDATION.md) documents the Heltec's live Meshtastic decoding, profile switching and saved-mode restart check.
+The [0.6.0 release record](docs/RELEASE_0_6_0.md) separates software checks, the owner's acceptance, and instrumented hardware observations. Its preceding chat5 Heltec build automatically stopped a capture after a write I/O error; the storage cause remains unidentified and that run did not achieve 30-minute capture acceptance. A malformed USB status line also interrupted one monitor. Follow-up receive-only checks completed without observed reset, watchdog or allocation failure. These results do not establish lossless reception, durable complete logs or a completed peer-interoperability matrix.
 
-MeshCore public announcements are implemented, but a known-source MeshCore reception has not yet been verified on hardware. The current branch adds group-text decryption and selectable Meshtastic presets; **known-source LongTurbo and MeshCore group reception, new-control device checks and reboot persistence are pending**. Direct-message decryption, newer Meshtastic AEAD/PKI modes, arbitrary hopping lists and Kismet datasource/PCAP-NG integration remain outside the supported subset. The published 0.5.0 release evidence is unchanged; its open live-service, Launcher and sustained-drive checks do not become completed tests through these source changes.
+Controlled channel/private peer exchanges, delivery receipts, final-image Launcher round trips and this messaging build's Cardputer hardware checks remain independently unverified. Messages supports private traffic addressed to its own trusted identity; passive Wardriver does not decrypt other users' private messages. Meshtastic channel text and NodeInfo are unsigned, so peers requiring `STRICT` signatures reject them; received XEdDSA signatures are not verified. Arbitrary hopping lists, a full upstream mesh-node stack and Kismet datasource/PCAP-NG integration are outside this release. [Messaging limits](docs/MESSAGING.md) · [Historical 0.5.0 results](docs/RELEASE_0_5_0.md).
 
 ## Credits and license
 

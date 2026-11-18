@@ -1,10 +1,10 @@
 # Combined Meshtastic and MeshCore observation
 
-LORA Tunnel provides a shared LoRa capture path with separate Meshtastic and MeshCore decoders. This development branch extends the published 0.5.0 implementation with selectable Meshtastic modem presets, including Long Turbo, and receive-only MeshCore group-text decoding. Wardriver sessions can stay on one protocol or alternate between one selected profile for each protocol. The device saves received radio bytes and radio settings before attempting to decode them, so later software can revisit incomplete or unsupported results.
+LORA Tunnel provides a shared LoRa capture path with separate Meshtastic and MeshCore decoders. Version 0.6.0 extends the earlier 0.5.0 implementation with selectable Meshtastic modem presets, including Long Turbo, and receive-only MeshCore group-text decoding. Separate [Messages mode](MESSAGING.md) supports channel/private conversations addressed to this device; this page describes passive Wardriver decoding. Wardriver sessions can stay on one protocol or alternate between one selected profile for each protocol. The device saves received radio bytes and radio settings before attempting to decode them, so later software can revisit incomplete or unsupported results.
 
 This document describes the source implementation. It does not certify a successful hardware capture, flash, drive, or service upload. The validation checklist below separates host checks from physical acceptance. The supported subset is listed explicitly; this is not a claim of complete Kismet decoder parity.
 
-[Earlier 0.5.0 validation](COMBINED_MESH_VALIDATION.md) remains a historical record. Physical acceptance of the new presets, group decoder and settings controls is **pending**; the earlier results do not certify this development build.
+[Earlier 0.5.0 validation](COMBINED_MESH_VALIDATION.md) remains a historical record. The [0.6.0 release record](RELEASE_0_6_0.md) separates owner acceptance from the instrumented observations and controlled peer checks that remain independently unverified; earlier results do not certify the final 0.6.0 binaries.
 
 ## Choose a mode
 

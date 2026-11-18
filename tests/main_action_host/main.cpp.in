@@ -1,0 +1,146 @@
+#include <atomic>
+#include <cstring>
+#include <deque>
+#include <iostream>
+#include <string>
+#include "ui.h"
+#include "messaging_airtime.h"
+using namespace tunnel;
+// @MAIN_DECLARATIONS@
+
+size_t strlcpy(char* out,const char* text,size_t capacity){const auto n=std::strlen(text);if(capacity){const auto copied=std::min(n,capacity-1);std::memcpy(out,text,copied);out[copied]=0;}return n;}
+ui::Model model;
+MessageOwner messageOwner=MessageOwner::Off;
+bool shutdownPending=false,stopping=false,ready=true,startAfterUpload=false,shutdownAfterMessages=false,shutdownHadSession=false;
+std::atomic<bool> capturing{false};
+uint32_t shutdownErrors=0,shutdownDrops=0,shutdownAt=0;
+struct {std::atomic<uint32_t> storage_errors{0},log_drops{0};} counters;
+struct {char region[12]="US";bool buzzer=true,lora_enabled=true;int messages=0;} config;
+struct {void setEnabled(bool){}} alertPlayer;
+const int pdTRUE=1,portMAX_DELAY=0;
+int actions=1,busMutex=1;
+int pdMS_TO_TICKS(int value){return value;}
+int xSemaphoreTake(int,int){return pdTRUE;}
+void xSemaphoreGive(int){}
+std::deque<Action> pending;
+int xQueueSend(int,const Action* action,int){if(pending.size()==4)return 0;pending.push_back(*action);return pdTRUE;}
+int xQueueReceive(int,Action* action,int){if(pending.empty())return 0;*action=pending.front();pending.pop_front();return pdTRUE;}
+uint32_t millis(){return 123456;}
+uint32_t messageUtc(){return 1800000000;}
+bool storageOk=true,cancelOk=true,radioStartOk=true,radioStopOk=true,saveOk=true;
+bool loggerIdle(){return true;}
+bool uploaderBusy(){return false;}
+bool storageReady(){return storageOk;}
+bool scannersMessagesCancelTx(){return cancelOk;}
+bool scannersMessagesEnd(){return radioStopOk;}
+bool scannersMessagesBegin(mesh::Protocol){return radioStartOk;}
+bool scannersConfigureLoRa(){return true;}
+bool regionHardwareCompatible(){return true;}
+const char* defaultMessageChannel(){return "LongTurbo";}
+void uploaderConfigChanged(){}
+bool uploaderRequest(int){return false;}
+void uploaderCancel(){}
+void requestSession(){}
+void selectMode(bool){}
+bool mountStorage(){return true;}
+bool saveMessagingSetting(int,const char*){return saveOk;}
+bool saveAutoUpload(int,bool){return saveOk;}
+int savedMode=-1;
+std::string savedPreset;
+bool saveLoRaMode(uint8_t mode){savedMode=mode;return saveOk;}
+bool saveMeshtasticPreset(const char* preset){savedPreset=preset;return saveOk;}
+bool saveMeshtasticSlot(uint16_t){return saveOk;}
+bool saveMeshCoreProfile(const char*){return saveOk;}
+bool saveLoRaDwell(uint32_t){return saveOk;}
+bool savePublicDecode(bool){return saveOk;}
+bool saveCredential(int,const char*){return saveOk;}
+struct SavedRegion {bool applied=true,sd_saved=true,nvs_saved=true;};
+SavedRegion saveLoRaRegion(const char*,bool){return {};}
+namespace tunnel {namespace messaging {
+View live;
+bool sendOk=true,announceOk=true,busyFlag=false;
+unsigned sendCalls=0,announceCalls=0,enableCalls=0;
+int sentContact=-9;
+std::string sentText;
+void view(View& out){out=live;}
+bool busy(){return busyFlag;}
+bool setTransmit(bool enabled){++enableCalls;if(!live.active)return false;if(enabled&&!live.identity_ready){strlcpy(live.status,"Identity unavailable; TX disabled",sizeof(live.status));return false;}live.tx_enabled=enabled;strlcpy(live.status,enabled?"TX enabled; send explicitly":"Listening; TX is off",sizeof(live.status));return true;}
+bool send(int index,const uint8_t*,const char* text,uint32_t,uint32_t){++sendCalls;sentContact=index;sentText=text;if(!live.active)return false;if(!live.tx_enabled){strlcpy(live.status,"Enable TX to send messages",sizeof(live.status));return false;}strlcpy(live.status,sendOk?"Message queued":"Wait five seconds between messages",sizeof(live.status));return sendOk;}
+bool announce(uint32_t,uint32_t){++announceCalls;if(!live.active)return false;strlcpy(live.status,announceOk?"Identity announcement queued":"MeshCore needs a fresh GPS UTC time",sizeof(live.status));return announceOk;}
+bool readHex(const char*,uint8_t*,uint8_t& length){length=0;return false;}
+bool trustContact(unsigned,const uint8_t*){return false;}
+bool forgetContact(unsigned,const uint8_t*){return false;}
+bool updateSettings(int,const char*){return true;}
+void radioFailure(const char* text){live.tx_enabled=false;strlcpy(live.status,text,sizeof(live.status));}
+}}
+void startMessages(int protocol){messageOwner=MessageOwner::Active;messaging::live.active=true;messaging::live.identity_ready=true;messaging::live.protocol=mesh::Protocol(protocol);strlcpy(messaging::live.status,"Listening; TX is off",64);}
+bool stopMessages(){if(!radioStopOk){strlcpy(model.notice,"Radio stop failed; retry before leaving",64);return false;}messageOwner=MessageOwner::Off;messaging::live={};return true;}
+
+// @MAIN_ACTIONS@
+
+unsigned checks=0;
+void expect(bool value,const char* description){++checks;if(!value){std::cerr<<"FAIL "<<description<<"\n";std::exit(1);}}
+void execute(ui::Action action,int field=0,const char* value=""){callback(action,field,value);performActions();}
+bool notice(const char* value){return std::strcmp(model.notice,value)==0;}
+int main(){
+  for(unsigned i=0;i<4;++i)callback(ui::Action::ToggleAlerts,1,"");
+  callback(ui::Action::SendMessage,-1,"synthetic unsent draft");
+  expect(chatActions.accepted==4&&chatActions.dropped==1&&pending.size()==4,"full bounded queue counts rejection without overwriting accepted actions");
+  expect(notice("Busy: please try again"),"queue rejection has visible feedback");
+  for(unsigned i=0;i<4;++i)performActions();
+  expect(chatActions.dequeued==4&&messaging::sendCalls==0,"rejected message never reaches engine");
+  const auto consumed=chatActions.dequeued;performActions();expect(chatActions.dequeued==consumed,"empty loop does not invent a dequeued action");
+
+  strlcpy(model.notice,"Mesh settings saved to SD",64);
+  execute(ui::Action::StartMessages,1);
+  expect(chatActions.owner_before==unsigned(MessageOwner::Off)&&chatActions.owner_after==unsigned(MessageOwner::Active),"start action records ownership transition");
+  expect(!model.notice[0]&&messaging::live.active,"start clears stale global notice");
+  strlcpy(model.notice,"Messaging settings saved",64);execute(ui::Action::ToggleMessageTx,1);
+  expect(messaging::live.tx_enabled&&!model.notice[0],"TX enable exposes current engine status instead of old save notice");
+  execute(ui::Action::SendMessage,-1,"synthetic message");
+  expect(messaging::sendCalls==1&&messaging::sentContact==-1&&messaging::sentText=="synthetic message","queued channel action retains its exact bounded text and destination");
+  expect(!model.notice[0]&&std::strcmp(messaging::live.status,"Message queued")==0,"successful send leaves live engine result visible");
+  messaging::sendOk=false;execute(ui::Action::SendMessage,-1,"second synthetic message");
+  expect(!model.notice[0]&&std::strcmp(messaging::live.status,"Wait five seconds between messages")==0,"failed send exposes its owning engine reason without pinning it in notice");
+  strlcpy(messaging::live.status,"Channel message received",64);
+  expect(!model.notice[0],"later receive status stays visible after a rejected send");
+  messaging::announceOk=false;execute(ui::Action::AnnounceIdentity);
+  expect(!model.notice[0]&&std::strcmp(messaging::live.status,"MeshCore needs a fresh GPS UTC time")==0,"failed announcement exposes its owning engine reason without a stale notice");
+  messaging::announceOk=true;execute(ui::Action::AnnounceIdentity);
+  expect(!model.notice[0],"successful announcement clears prior failed-send/clock notice");
+
+  cancelOk=false;execute(ui::Action::ToggleMessageTx,0);
+  expect(messaging::live.tx_enabled&&notice("TX stop failed; retry Stop Messages"),"failed TX cancellation is visible and does not falsely claim disabled");
+  cancelOk=true;execute(ui::Action::ToggleMessageTx,0);
+  expect(!messaging::live.tx_enabled&&!model.notice[0],"successful TX cancellation exposes listening status");
+  std::strcpy(config.region,"RU");const auto enables=messaging::enableCalls;execute(ui::Action::ToggleMessageTx,1);
+  expect(messaging::enableCalls==enables&&!messaging::live.tx_enabled&&notice("This region is receive-only for messaging"),"unsupported TX region is rejected visibly before engine enabling");
+  std::strcpy(config.region,"US");execute(ui::Action::ToggleMessageTx,9);
+  expect(messaging::enableCalls==enables&&notice("Invalid transmission selection"),"invalid TX value cannot become implicit enable");
+
+  radioStopOk=false;execute(ui::Action::StopMessages);
+  expect(messageOwner==MessageOwner::Active&&notice("Radio stop failed; retry before leaving"),"failed stop retains ownership and its specific reason");
+  radioStopOk=true;execute(ui::Action::StopMessages);
+  expect(chatActions.owner_before==unsigned(MessageOwner::Active)&&chatActions.owner_after==unsigned(MessageOwner::Off),"explicit stop records ownership transition");
+  expect(notice("Messages stopped; capture ready"),"successful stop has visible completion");
+  execute(ui::Action::SendMessage,-1,"inactive synthetic");expect(notice("Open Messages before sending"),"inactive send has explicit failure feedback");
+  execute(ui::Action::AnnounceIdentity);expect(notice("Open Messages before announcing"),"inactive announce has explicit failure feedback");
+  execute(ui::Action::ToggleMessageTx,1);expect(notice("Open Messages before changing TX"),"inactive TX action has explicit failure feedback");
+
+  execute(ui::Action::SaveLoRaMode,0);
+  expect(savedMode==0&&notice("Mesh settings saved to SD"),"Meshtastic selection forwards mode zero through real dispatcher");
+  execute(ui::Action::SaveLoRaMode,2);
+  expect(savedMode==2&&notice("Mesh settings saved to SD"),"combined selection forwards mode two without swapping values");
+  execute(ui::Action::SaveMeshtasticPreset,0,"LONG_TURBO");
+  expect(savedPreset=="LONG_TURBO"&&notice("Mesh settings saved to SD"),"preset action forwards requested name rather than current selection");
+  execute(ui::Action::SaveMeshtasticPreset,0,"LONG_TURBO");
+  expect(notice("Mesh settings saved to SD"),"re-saving current selection truthfully reports save success without implying a change");
+  saveOk=false;execute(ui::Action::SaveMeshtasticPreset,0,"LONG_FAST");
+  expect(notice("Profile/slot unavailable or save failed"),"failed mesh save cannot claim saved success");saveOk=true;
+
+  const auto calls=messaging::sendCalls;shutdownPending=true;execute(ui::Action::SendMessage,-1,"discard during shutdown");
+  expect(chatActions.ignored_shutdown==1&&messaging::sendCalls==calls,"shutdown-discarded actions are counted and never sent");
+  expect(chatActions.last_action==unsigned(ui::Action::SendMessage)&&chatActions.last_field==-1,"last action/field diagnostics describe the dequeued request without storing text");
+  expect(chatActions.accepted==chatActions.dequeued&&chatActions.dropped==1&&pending.empty(),"lifetime queue counts reconcile after all actions including shutdown discard");
+  std::cout<<"Main action host: "<<checks<<" checks passed; real callback/dispatcher, bounded queue and owning messaging feedback verified.\n";
+}

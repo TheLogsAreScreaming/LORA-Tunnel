@@ -39,6 +39,80 @@ void capture(const char* directory,const char* name,const ui::Model& model) {
 bool screenHas(const char* text) {for(const auto& c:gfx().commands)if(c.text.find(text)!=std::string::npos)return true;return false;}
 void tap(int x,int y,const ui::Model& m) {touchAction(uint16_t(x),uint16_t(y),m);paint(m);}
 void press(uint8_t key,const ui::Model& m) {ui::navigation(key,m);paint(m);}
+void touchTick(hw::TouchState state,uint16_t x,uint16_t y,uint32_t elapsed,const ui::Model& m) {
+  hostMillis+=elapsed;hw::hostTouchState=state;hw::hostTouchX=x;hw::hostTouchY=y;
+  ui::tick(m);
+}
+void touchTick(bool pressed,uint16_t x,uint16_t y,uint32_t elapsed,const ui::Model& m) {
+  touchTick(pressed?hw::TouchState::Pressed:hw::TouchState::Released,x,y,elapsed,m);
+}
+void touchGestureChecks() {
+  using ui::messages::Screen;using tunnel::mesh::Protocol;
+  ui::Model m;m.region_selection_made=true;m.messages.active=true;m.messages.protocol=Protocol::Meshtastic;
+  m.messages.tx_enabled=true;
+  const bool previousBuffered=buffered;buffered=false;splashShown=onboardingShown=true;bootAt=0;
+  wasPressed=false;touchReleasePending=false;focusVisible=false;hostMillis=10000;sent.clear();
+  setPage(Page::Messages);messageState={};messageState.screen=Screen::Contacts;messagePage=0;
+  touchTick(false,0,0,1,m);
+  touchTick(true,100,296,1,m);
+  expect(messageState.screen==Screen::Menu&&sent.empty(),"one Back touch leaves Contacts without stopping messaging");
+  touchTick(true,100,296,10,m);
+  expect(page==Page::Messages&&sent.empty(),"held Back does not repeat");
+  touchTick(false,100,296,10,m); // A brief valid no-touch report also needs filtering.
+  touchTick(true,100,296,10,m);
+  expect(page==Page::Messages&&messageState.screen==Screen::Menu&&sent.empty(),"brief missing touch report cannot turn Back into Stop Messages");
+  touchTick(hw::TouchState::Unavailable,100,296,500,m);
+  touchTick(hw::TouchState::Unavailable,100,296,500,m);touchTick(true,100,296,1,m);
+  expect(page==Page::Messages&&sent.empty(),"sustained touch read failure and recovery cannot repeat held Back");
+  touchTick(false,100,296,1,m);touchTick(hw::TouchState::Unavailable,100,296,500,m);
+  touchTick(true,100,296,1,m);
+  expect(page==Page::Messages&&sent.empty(),"release then sustained unavailable then pressed is not a stable release");
+  touchTick(false,100,296,1,m);touchTick(hw::TouchState::Unavailable,100,296,500,m);
+  touchTick(false,100,296,1,m);touchTick(true,100,296,10,m);
+  expect(page==Page::Messages&&sent.empty(),"unavailable reports interrupt rather than complete a pending release");
+  touchTick(false,100,296,1,m);touchTick(false,100,296,70,m);
+  touchTick(true,100,296,1,m);
+  expect(page==Page::Home&&sent.size()==1&&sent.back().action==ui::Action::StopMessages,"a separate released Back press still stops messaging exactly once");
+  touchTick(false,100,296,1,m);touchTick(false,100,296,70,m);
+  setPage(Page::Messages);messageState={};messageState.screen=Screen::Menu;messagePage=1;
+  m.messages.tx_enabled=false;const auto before=sent.size();
+  touchTick(true,100,105,1,m);
+  expect(messageState.screen==Screen::TxConfirm&&sent.size()==before,"real touch event opens TX confirmation without enabling transmission");
+  touchTick(false,100,105,10,m);touchTick(true,100,225,10,m);
+  expect(messageState.screen==Screen::TxConfirm&&sent.size()==before,"drag and brief missing touch report cannot accept the new TX confirmation");
+  touchTick(hw::TouchState::Unavailable,100,105,500,m);touchTick(hw::TouchState::Unavailable,100,225,500,m);
+  touchTick(true,100,225,1,m);
+  expect(messageState.screen==Screen::TxConfirm&&sent.size()==before,"sustained controller failure cannot accept TX confirmation on recovery");
+  touchTick(false,100,225,1,m);touchTick(false,100,225,70,m);
+  touchTick(true,100,225,1,m);
+  expect(messageState.screen==Screen::Menu&&sent.size()==before+1&&sent.back().action==ui::Action::ToggleMessageTx&&sent.back().value==1,"a separate confirm touch enables TX once");
+  touchTick(true,100,225,100,m);
+  expect(sent.size()==before+1,"holding confirmed TX touch emits no duplicate action");
+  touchTick(false,100,225,1,m);touchTick(false,100,225,70,m);
+  // The release filter must use unsigned time, just like the rest of the UI.
+  hostMillis=UINT32_MAX-30;bootAt=hostMillis-2000;messageState.screen=Screen::Contacts;
+  touchTick(true,100,296,1,m);const auto beforeWrap=sent.size();
+  touchTick(false,100,296,1,m);touchTick(true,100,296,40,m);
+  expect(page==Page::Messages&&sent.size()==beforeWrap,"touch dropout spanning millis wrap does not repeat Back");
+  touchTick(false,100,296,1,m);touchTick(false,100,296,70,m);
+  touchTick(true,100,296,1,m);
+  expect(page==Page::Home&&sent.size()==beforeWrap+1,"released Back remains usable across millis wrap");
+  touchTick(false,100,296,1,m);touchTick(false,100,296,70,m);
+  // Exercise the real focus target ordering, not only touch coordinates.
+  hostMillis=10000;bootAt=0;m.buttons_enabled=true;
+  setPage(Page::Messages);messageState={};messageState.screen=Screen::Menu;messagePage=0;focusIndex=-1;
+  touchTick(hw::TouchState::Unavailable,0,0,500,m);
+  for(unsigned i=0;i<6;++i)press(hw::Next,m);
+  const auto beforeButtons=sent.size();press(hw::Select,m);
+  expect(messagePage==1&&sent.size()==beforeButtons,"physical buttons reach the next message menu page without stopping the radio");
+  expect(focusIndex==0,"new message page visibly focuses its first row");press(hw::Select,m);
+  expect(messageState.screen==Screen::TxConfirm&&sent.size()==beforeButtons,"physical Select opens TX confirmation on the second menu page");
+  expect(focusIndex==0,"TX confirmation defaults physical focus to Cancel");press(hw::Next,m);press(hw::Select,m);
+  expect(messageState.screen==Screen::Menu&&sent.size()==beforeButtons+1&&sent.back().action==ui::Action::ToggleMessageTx&&sent.back().value==1,"physical buttons select explicit TX approval exactly once");
+  expect(hw::hostTouchState==hw::TouchState::Unavailable,"physical navigation remains independent of unavailable touch hardware");
+  hw::hostTouchState=hw::TouchState::Released;
+  buffered=previousBuffered;sent.clear();hostMillis=2000;bootAt=0;focusVisible=false;messageEditor=false;
+}
 void messagingChecks(const char* output,ui::Model& m) {
   ui_message_regression::run(expect);
   using ui::messages::Screen;using tunnel::messaging::Delivery;using tunnel::mesh::Protocol;
@@ -151,6 +225,7 @@ int main(int argc,char** argv) {
     }
   }
   messagingChecks(output,model);
+  touchGestureChecks();
   expect(!hostAllocationCount,"mesh and messaging pages require no new framebuffer allocation");
   std::cout<<"Heltec mesh UI: "<<assertions<<" checks passed; all draw and button-focus bounds checked. Synthetic previews only.\n";
 }

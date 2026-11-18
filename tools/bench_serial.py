@@ -19,6 +19,34 @@ RADIO_FIELDS = ("mode", "protocol", "frequency_khz", "bandwidth_hz", "sf", "cr",
                 "remaining_ms", "switches", "deferrals", "timeouts", "interruptions",
                 "mt_listen_ms", "mc_listen_ms", "mt_rx", "mc_rx", "decoded", "other")
 CHAT_FIELDS = ("owner", "active", "tx", "identity_ready", "contacts", "inbox", "pending", "workspace")
+CHAT_ENGINE_FIELDS = ("starts", "stops", "tx_enable_requests", "tx_enabled", "tx_disable_requests",
+                      "send_requests", "send_queued", "announce_requests", "announce_queued",
+                      "rx_frames", "rx_text", "rx_nodes", "rx_receipts", "tx_ok", "tx_fail", "radio_failures")
+CHAT_ACTION_FIELDS = ("accepted", "dropped", "dequeued", "ignored_shutdown", "last_action",
+                      "last_field", "owner_before", "owner_after")
+
+
+def parse_chat_diagnostics(line, prefix, fields):
+    if not line.startswith(prefix + " "):
+        return None
+    values = {}
+    for token in line[len(prefix) + 1:].split():
+        if "=" not in token:
+            return None
+        key, raw = token.split("=", 1)
+        if key not in fields:
+            continue
+        signed = key == "last_field"
+        if key in values or not re.fullmatch(r"-?[0-9]{1,10}" if signed else r"[0-9]{1,10}", raw):
+            return None
+        value = int(raw)
+        lower, upper = (-2147483648, 2147483647) if signed else (0, 4294967295)
+        if key in ("owner_before", "owner_after"):
+            upper = 4
+        if not lower <= value <= upper:
+            return None
+        values[key] = value
+    return values if all(key in values for key in fields) else None
 
 
 def parse_chat(line):
@@ -123,6 +151,8 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
     pending = bytearray()
     discarding = False
     latest = latest_at = first_at = None
+    latest_chat = latest_radio = None
+    latest_chat_at = latest_radio_at = None
     started = None
     max_gap = 0.0
 
@@ -218,13 +248,23 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
                 elif line.startswith("LT RADIO "):
                     radio = parse_radio(line)
                     if radio is not None and latest is not None:
+                        latest_radio, latest_radio_at = radio, clock()
                         emit("LT RADIO " + " ".join(f"{key}={radio[key]}" for key in RADIO_FIELDS))
                     else:
                         omitted += 1
                 elif line.startswith("LT CHAT "):
                     chat = parse_chat(line)
                     if chat is not None and latest is not None:
+                        latest_chat, latest_chat_at = chat, clock()
                         emit("LT CHAT " + " ".join(f"{key}={chat[key]}" for key in CHAT_FIELDS))
+                    else:
+                        omitted += 1
+                elif line.startswith(("LT CHAT_ENGINE ", "LT CHAT_ACTION ")):
+                    prefix, fields = (("LT CHAT_ENGINE", CHAT_ENGINE_FIELDS) if line.startswith("LT CHAT_ENGINE ")
+                                      else ("LT CHAT_ACTION", CHAT_ACTION_FIELDS))
+                    diagnostic = parse_chat_diagnostics(line, prefix, fields)
+                    if diagnostic is not None and latest is not None:
+                        emit(prefix + " " + " ".join(f"{key}={diagnostic[key]}" for key in fields))
                     else:
                         omitted += 1
                 else:
@@ -245,6 +285,17 @@ def run_bench(connection, command, seconds, *, clock=time.monotonic,
         if not state_matches(command, latest):
             expected = "running=1" if command == "start" else "running=0 saving=0"
             return finish(3, f"command did not reach {expected} before timeout")
+        if command in ("chat-mt", "chat-mc", "chat-stop"):
+            if (latest_chat is None or clock() - latest_chat_at > STATUS_MAX_AGE_SECONDS or
+                    latest["running"] or latest["saving"]):
+                return finish(3, "messaging state was not acknowledged while capture was stopped")
+            if command == "chat-stop":
+                if latest_chat["owner"] != 0 or latest_chat["active"] or latest_chat["tx"]:
+                    return finish(3, "messaging did not finish stopping")
+            elif (latest_chat["owner"] != 2 or not latest_chat["active"] or not latest_chat["identity_ready"] or
+                  latest_chat["tx"] or latest_radio is None or clock() - latest_radio_at > STATUS_MAX_AGE_SECONDS or
+                  latest_radio["protocol"] != (1 if command == "chat-mt" else 2)):
+                return finish(3, "requested messaging protocol did not start with TX off")
         return finish(0, "post-command status and requested state verified")
     except (OSError, serial.SerialException):
         return finish(1, "serial communication failed")

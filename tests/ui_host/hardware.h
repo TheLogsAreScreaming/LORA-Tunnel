@@ -57,6 +57,10 @@ public:
 }
 namespace hw {
 enum Navigation : uint8_t {Next=1,Select=2,Back=4};
-inline bool touch(uint16_t&,uint16_t&){return false;}
+enum class TouchState : uint8_t {Unavailable,Released,Pressed};
+static TouchState hostTouchState=TouchState::Released;
+static uint16_t hostTouchX=0,hostTouchY=0;
+inline TouchState readTouch(uint16_t& x,uint16_t& y){x=hostTouchX;y=hostTouchY;return hostTouchState;}
+inline bool touch(uint16_t& x,uint16_t& y){return readTouch(x,y)==TouchState::Pressed;}
 inline lgfx::LGFX_Device& display() {static lgfx::LGFX_Device screen;return screen;}
 }

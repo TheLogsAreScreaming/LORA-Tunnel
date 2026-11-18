@@ -54,6 +54,12 @@ StaticQueue_t captureQueueControl;
 uint8_t* captureQueueStorage=nullptr;
 struct Action { ui::Action action; int field; char value[128]{}; uint8_t contact_key[32]{}; };
 QueueHandle_t actions=nullptr;
+struct ChatActionDiagnostics {
+  uint32_t accepted=0,dropped=0,dequeued=0,ignored_shutdown=0;
+  uint32_t last_action=UINT32_MAX;
+  int32_t last_field=0;
+  unsigned owner_before=0,owner_after=0;
+} chatActions;
 struct Summary {
   bool used=false;
   Kind kind=Kind::Wifi;
@@ -80,7 +86,8 @@ void callback(ui::Action action,int field,const char* value) {
   strlcpy(request.value,value,sizeof(request.value));
   if(action==ui::Action::SendMessage&&field>=0&&field<model.messages.contact_count&&model.messages.contacts)
     memcpy(request.contact_key,model.messages.contacts[field].public_key,32);
-  if(xQueueSend(actions,&request,0)!=pdTRUE) strlcpy(model.notice,"Busy: please try again",sizeof(model.notice));
+  if(xQueueSend(actions,&request,0)==pdTRUE)++chatActions.accepted;
+  else {++chatActions.dropped;strlcpy(model.notice,"Busy: please try again",sizeof(model.notice));}
   memset(request.value,0,sizeof(request.value));
 }
 const char* defaultMessageChannel() {
@@ -119,7 +126,7 @@ void finishMessageStart() {
   messageOwner=MessageOwner::Active;model.notice[0]=0;
 }
 void startMessages(int protocol) {
-  if(protocol!=1&&protocol!=2)return;
+  if(protocol!=1&&protocol!=2){strlcpy(model.notice,"Choose Meshtastic or MeshCore",sizeof(model.notice));return;}
   if(messageOwner!=MessageOwner::Off){strlcpy(model.notice,"Stop current Messages mode first",sizeof(model.notice));return;}
   if(capturing||stopping||!loggerIdle()||uploaderBusy()||!ready||shutdownPending||quietActive){
     strlcpy(model.notice,"Stop and save capture/upload before Messages",sizeof(model.notice));return;
@@ -326,21 +333,44 @@ void selectMode(bool recon) {
 void performActions() {
   Action action;
   if(xQueueReceive(actions,&action,0)!=pdTRUE) return;
+  ++chatActions.dequeued;chatActions.last_action=unsigned(action.action);chatActions.last_field=action.field;
+  chatActions.owner_before=chatActions.owner_after=unsigned(messageOwner);
   if(shutdownPending && action.action!=ui::Action::Shutdown) {
+    ++chatActions.ignored_shutdown;
     volatile char* secret=action.value;
     for(size_t i=0;i<sizeof(action.value);++i) secret[i]=0;
     return;
   }
   switch(action.action) {
+    case ui::Action::StartMessages:case ui::Action::StopMessages:case ui::Action::ToggleMessageTx:
+    case ui::Action::SendMessage:case ui::Action::AnnounceIdentity:case ui::Action::TrustContact:
+    case ui::Action::ForgetContact:case ui::Action::SaveMessagingSetting:
+      // Old settings notices must not mask this command's live engine result.
+      model.notice[0]=0;break;
+    default:break;
+  }
+  const auto messageFailure=[](const char* fallback) {
+    messaging::View result;messaging::view(result);
+    // The engine owns its changing status; copying it into persistent notice
+    // would hide a later receive/transmit result after a rejected command.
+    if(!result.active||!result.status[0])strlcpy(model.notice,fallback,sizeof(model.notice));
+  };
+  switch(action.action) {
     case ui::Action::StartMessages: startMessages(action.field);break;
-    case ui::Action::StopMessages: stopMessages();break;
+    case ui::Action::StopMessages:
+      if(stopMessages())strlcpy(model.notice,"Messages stopped; capture ready",sizeof(model.notice));
+      else if(!model.notice[0])strlcpy(model.notice,"Stopping Messages; please wait",sizeof(model.notice));
+      break;
     case ui::Action::ToggleMessageTx:
-      if(action.field&&(!messaging::dutyPercent(config.region)))strlcpy(model.notice,"This region is receive-only for messaging",sizeof(model.notice));
-      else if(action.field||scannersMessagesCancelTx())messaging::setTransmit(action.field!=0);
+      if(action.field!=0&&action.field!=1)strlcpy(model.notice,"Invalid transmission selection",sizeof(model.notice));
+      else if(action.field&&(!messaging::dutyPercent(config.region)))strlcpy(model.notice,"This region is receive-only for messaging",sizeof(model.notice));
+      else if(!action.field&&!scannersMessagesCancelTx())strlcpy(model.notice,"TX stop failed; retry Stop Messages",sizeof(model.notice));
+      else if(!messaging::setTransmit(action.field!=0))messageFailure("Open Messages before changing TX");
       break;
     case ui::Action::SendMessage:
-      messaging::send(action.field,action.contact_key,action.value,millis(),messageUtc());break;
-    case ui::Action::AnnounceIdentity: messaging::announce(millis(),messageUtc());break;
+      if(!messaging::send(action.field,action.contact_key,action.value,millis(),messageUtc()))messageFailure("Open Messages before sending");break;
+    case ui::Action::AnnounceIdentity:
+      if(!messaging::announce(millis(),messageUtc()))messageFailure("Open Messages before announcing");break;
     case ui::Action::TrustContact:
     case ui::Action::ForgetContact: {
       uint8_t key[32]{},length=0;
@@ -461,6 +491,7 @@ void performActions() {
       }
       break;
   }
+  chatActions.owner_after=unsigned(messageOwner);
   volatile char* secret=action.value;
   for(size_t i=0;i<sizeof(action.value);++i) secret[i]=0;
 }
@@ -562,6 +593,17 @@ void serialStatus() {
   // Only receiver settings and counters: never packet contents, keys or locations.
   Serial.printf("LT CHAT owner=%u active=%u tx=%u identity_ready=%u contacts=%u inbox=%u pending=%u workspace=%u\n",
       unsigned(messageOwner),chat.active,chat.tx_enabled,chat.identity_ready,unsigned(chat.contact_count),unsigned(chat.history_count),messaging::busy(),unsigned(messaging::workspaceBytes()));
+  Serial.printf("LT CHAT_ACTION accepted=%lu dropped=%lu dequeued=%lu ignored_shutdown=%lu last_action=%lu last_field=%ld owner_before=%u owner_after=%u\n",
+      (unsigned long)chatActions.accepted,(unsigned long)chatActions.dropped,(unsigned long)chatActions.dequeued,
+      (unsigned long)chatActions.ignored_shutdown,(unsigned long)chatActions.last_action,(long)chatActions.last_field,
+      chatActions.owner_before,chatActions.owner_after);
+  const auto chatEngine=messaging::diagnostics();
+  Serial.printf("LT CHAT_ENGINE starts=%lu stops=%lu tx_enable_requests=%lu tx_enabled=%lu tx_disable_requests=%lu send_requests=%lu send_queued=%lu announce_requests=%lu announce_queued=%lu rx_frames=%lu rx_text=%lu rx_nodes=%lu rx_receipts=%lu tx_ok=%lu tx_fail=%lu radio_failures=%lu\n",
+      (unsigned long)chatEngine.starts,(unsigned long)chatEngine.stops,(unsigned long)chatEngine.tx_enable_requests,
+      (unsigned long)chatEngine.tx_enabled,(unsigned long)chatEngine.tx_disable_requests,(unsigned long)chatEngine.send_requests,
+      (unsigned long)chatEngine.send_queued,(unsigned long)chatEngine.announce_requests,(unsigned long)chatEngine.announce_queued,
+      (unsigned long)chatEngine.rx_frames,(unsigned long)chatEngine.rx_text,(unsigned long)chatEngine.rx_nodes,
+      (unsigned long)chatEngine.rx_receipts,(unsigned long)chatEngine.tx_ok,(unsigned long)chatEngine.tx_fail,(unsigned long)chatEngine.radio_failures);
   Serial.printf("LT RADIO mode=%u protocol=%u frequency_khz=%lu bandwidth_hz=%lu sf=%u cr=%u sync=%u remaining_ms=%lu switches=%lu deferrals=%lu timeouts=%lu interruptions=%lu mt_listen_ms=%lu mc_listen_ms=%lu mt_rx=%lu mc_rx=%lu decoded=%lu other=%lu\n",
     unsigned(config.lora_mode),unsigned(radioMetrics.active.protocol),
     (unsigned long)(radioMetrics.active.frequency_mhz*1000.0f+0.5f),

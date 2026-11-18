@@ -55,6 +55,7 @@ struct State {
   mt::Frame response{};
 };
 State* state=nullptr;
+Diagnostics metrics{};
 char inactiveStatus[64]{};
 void copy(char* target,std::size_t capacity,const char* source) {
   if(!capacity)return;
@@ -193,6 +194,7 @@ void queueReceipt(const mt::Parsed& received,const Contact& peer,std::uint32_t n
 }
 
 std::size_t workspaceBytes(){return sizeof(State);}
+Diagnostics diagnostics(){return metrics;}
 bool active(){return state!=nullptr;}
 bool busy(){return state&&(state->pending.used||state->response.length||state->ack_inflight);}
 bool transmitAllowed(){return state&&state->tx&&state->identity_ready;}
@@ -200,7 +202,7 @@ bool begin(mesh::Protocol protocol,const Settings& settings,const char* defaultC
   if(state||!validSettings(settings)||!printable(defaultChannel,39)||!storage.load||!storage.save||!storage.random||!storage.allocate||!storage.release||
       (protocol!=mesh::Protocol::Meshtastic&&protocol!=mesh::Protocol::MeshCore))return false;
   void* memory=storage.allocate(sizeof(State));if(!memory){status("Messaging memory unavailable");return false;}
-  std::memset(memory,0,sizeof(State));state=new(memory)State{};auto& s=*state;s.storage=storage;s.protocol=protocol;s.settings=settings;
+  std::memset(memory,0,sizeof(State));state=new(memory)State{};++metrics.starts;auto& s=*state;s.storage=storage;s.protocol=protocol;s.settings=settings;
   auto loaded=storage.load("identity-v1",&s.identity,sizeof(s.identity));
   if(loaded==Load::Missing){
     s.identity=IdentityStore{};
@@ -229,6 +231,7 @@ bool begin(mesh::Protocol protocol,const Settings& settings,const char* defaultC
 }
 void end() {
   if(!state)return;
+  ++metrics.stops;
   const auto storage=state->storage;state->~State();wipe(state,sizeof(State));storage.release(state);state=nullptr;
   copy(inactiveStatus,sizeof(inactiveStatus),"Messages stopped; inbox cleared");
 }
@@ -243,9 +246,11 @@ void view(View& out) {
   out.history=s.history;out.history_count=s.history_count;out.contacts=s.peers.contacts;out.contact_count=s.peers.count;
 }
 bool setTransmit(bool enabled) {
+  if(enabled)++metrics.tx_enable_requests;else ++metrics.tx_disable_requests;
   if(!state)return false;
   if(enabled&&!state->identity_ready){status("Identity unavailable; TX disabled");return false;}
   state->tx=enabled;
+  if(enabled)++metrics.tx_enabled;
   if(!enabled){if(state->pending.used)clearPending(Delivery::Cancelled);state->response=mt::Frame{};state->ack_inflight=false;}
   status(enabled?"TX enabled; send or announce explicitly":"Listening; TX is off");return true;
 }
@@ -272,6 +277,7 @@ bool forgetContact(unsigned index,const std::uint8_t key[32]) {
   status("Contact forgotten");return true;
 }
 bool send(int contact,const std::uint8_t expectedKey[32],const char* text,std::uint32_t now,std::uint32_t unixTime) {
+  ++metrics.send_requests;
   if(!canQueue(now))return false;
   if(!printable(text,TextBytes)){status("Message must contain 1-120 printable characters");return false;}
   auto& s=*state;auto& p=s.pending;
@@ -287,15 +293,16 @@ bool send(int contact,const std::uint8_t expectedKey[32],const char* text,std::u
   p.used=true;s.last_user_send=now;s.user_sent=true;
   Record record;record.protocol=s.protocol;record.outgoing=true;record.direct=p.direct;record.id=p.id;record.peer=p.contact.node;record.delivery=Delivery::Queued;
   copy(record.name,sizeof(record.name),p.direct?p.contact.name:s.settings.name);copy(record.text,sizeof(record.text),text);addRecord(record);
-  status("Message queued");return true;
+  ++metrics.send_queued;status("Message queued");return true;
 }
 bool announce(std::uint32_t now,std::uint32_t unixTime) {
+  ++metrics.announce_requests;
   if(!canQueue(now))return false;
   auto& s=*state;auto& p=s.pending;bool ok=false;
   if(s.protocol==mesh::Protocol::Meshtastic){auto options=tx();p.id=options.packet_id;ok=options.packet_id&&mt::encodeNodeInfo(s.channel,s.mt_identity,options,p.frame,mt::platformCrypto(),true);}
   else {mc::Frame frame;const auto time=timestamp(unixTime);p.id=time;ok=time&&mc::advert(s.mc_identity,s.settings.name,time,mc::platformCrypto(),frame);if(ok)frameCopy(p.frame,frame);}
   if(!ok){p=Pending{};status("Identity announcement unavailable");return false;}
-  p.used=p.ready=true;s.last_user_send=now;s.user_sent=true;status("Identity announcement queued");return true;
+  p.used=p.ready=true;s.last_user_send=now;s.user_sent=true;++metrics.announce_queued;status("Identity announcement queued");return true;
 }
 bool nextFrame(std::uint32_t now,const std::uint8_t*& bytes,std::size_t& length) {
   bytes=nullptr;length=0;if(!state||!state->tx||!state->identity_ready)return false;
@@ -308,8 +315,9 @@ bool nextFrame(std::uint32_t now,const std::uint8_t*& bytes,std::size_t& length)
 }
 void transmitted(bool success,std::uint32_t now) {
   if(!state)return;auto& s=*state;
-  if(s.ack_inflight){s.ack_inflight=false;s.response=mt::Frame{};if(!success)status("Reply transmission failed");return;}
+  if(s.ack_inflight){if(success)++metrics.tx_ok;else ++metrics.tx_fail;s.ack_inflight=false;s.response=mt::Frame{};if(!success)status("Reply transmission failed");return;}
   auto& p=s.pending;if(!p.used||!p.inflight)return;p.inflight=false;++p.attempts;
+  if(success)++metrics.tx_ok;else ++metrics.tx_fail;
   if(!success){clearPending(Delivery::Failed);status("Transmit failed; reception restored");return;}
   if(!p.direct){clearPending(Delivery::Sent);status("Sent; delivery unconfirmed");return;}
   p.deadline=now+ReceiptWait;delivery(p.id,Delivery::AwaitingAck);status("Sent; waiting for recipient receipt");
@@ -321,10 +329,11 @@ void tick(std::uint32_t now) {
   if(!state->tx||!makePendingFrame()){clearPending(Delivery::Failed);status("Retry unavailable");return;}
   delivery(p.id,Delivery::Queued);status("Retry queued");
 }
-void radioFailure(const char* value) {if(state){state->tx=false;if(state->pending.used)clearPending(Delivery::Failed);state->response=mt::Frame{};state->ack_inflight=false;}status(value);}
+void radioFailure(const char* value) {if(state){++metrics.radio_failures;state->tx=false;if(state->pending.used)clearPending(Delivery::Failed);state->response=mt::Frame{};state->ack_inflight=false;}status(value);}
 
 void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std::uint32_t unixTime) {
   if(!state||!frame||!length||length>255||!state->identity_ready)return;
+  ++metrics.rx_frames;
   auto& s=*state;
   if(s.protocol==mesh::Protocol::Meshtastic){
     mt::Header header;if(!mt::peekHeader(frame,length,header)||header.from==s.identity.node)return;
@@ -347,11 +356,13 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
     if(parsed.kind==mt::Kind::Receipt){
       auto& p=s.pending;
       if(p.used&&p.direct&&p.attempts&&!p.inflight&&mt::receiptMatches(parsed,s.identity.node,p.contact.node,p.id,false)){
+        ++metrics.rx_receipts;
         if(parsed.routing_error){clearPending(Delivery::Failed);status("Recipient returned a routing error");}
         else {const bool authenticated=parsed.authenticated;clearPending(authenticated?Delivery::Delivered:Delivery::ReceiptUnverified);status(authenticated?"Private message delivered":"Receipt received; sender proof unavailable");}
       }return;
     }
     if(parsed.kind==mt::Kind::NodeInfo){
+      ++metrics.rx_nodes;
       if(parsed.has_public_key)discover(s.protocol,header.from,parsed.public_key,parsed.name);
       if(parsed.request_response&&s.tx&&!s.response.length&&!s.ack_inflight){
         auto options=tx();if(options.packet_id&&mt::encodeNodeInfo(s.channel,s.mt_identity,options,s.response,mt::platformCrypto(),false,header.from))s.ack_ready_at=now+500+s.storage.random()%1000;
@@ -364,11 +375,11 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
     if(!remember(header.from,header.id,direct))return;
     Record record;record.protocol=s.protocol;record.id=header.id;record.peer=header.from;record.direct=direct;record.authenticated=parsed.authenticated;
     if(peer&&peer->name[0])copy(record.name,sizeof(record.name),peer->name);else std::snprintf(record.name,sizeof(record.name),"!%08lx",static_cast<unsigned long>(header.from));
-    copy(record.text,sizeof(record.text),parsed.text);addRecord(record);status(direct?"Private message received":"Channel message received");return;
+    copy(record.text,sizeof(record.text),parsed.text);addRecord(record);++metrics.rx_text;status(direct?"Private message received":"Channel message received");return;
   }
   mc::Contact discovered;
   if(mc::parseAdvert(frame,length,mc::platformCrypto(),discovered)){
-    if(std::memcmp(discovered.public_key,s.mc_identity.public_key,32))discover(s.protocol,0,discovered.public_key,discovered.name);return;
+    if(std::memcmp(discovered.public_key,s.mc_identity.public_key,32)){++metrics.rx_nodes;discover(s.protocol,0,discovered.public_key,discovered.name);}return;
   }
   if(s.pending.used&&s.pending.direct&&s.pending.attempts&&!s.pending.inflight){
     mc::Message receipt;
@@ -376,6 +387,7 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
     for(unsigned attempt=0;attempt<s.pending.attempts&&!matched;++attempt)
       matched=mc::parseReceipt(frame,length,s.mc_identity,mcContact(s.pending.contact),s.pending.ack[attempt],mc::platformCrypto(),receipt);
     if(matched){
+      ++metrics.rx_receipts;
       const bool verified=receipt.receipt_trust==mc::ReceiptTrust::AuthenticatedPeer;
       clearPending(verified?Delivery::Delivered:Delivery::ReceiptUnverified);status(verified?"Private message delivered":"Receipt received; sender proof unavailable");return;
     }
@@ -394,13 +406,13 @@ void receive(const std::uint8_t* frame,std::size_t length,std::uint32_t now,std:
     if(seen)return;
     s.peers.last_time[i]=std::max(s.peers.last_time[i],message.timestamp);
     if(!remember(peerHash,message.timestamp,true))return;
-    Record record;record.protocol=s.protocol;record.id=message.timestamp;record.direct=record.authenticated=true;copy(record.name,sizeof(record.name),peer.name);copy(record.text,sizeof(record.text),message.text);addRecord(record);status("Private message received");return;
+    Record record;record.protocol=s.protocol;record.id=message.timestamp;record.direct=record.authenticated=true;copy(record.name,sizeof(record.name),peer.name);copy(record.text,sizeof(record.text),message.text);addRecord(record);++metrics.rx_text;status("Private message received");return;
   }
   mc::Message group;
   if(mc::parseGroup(frame,length,mcKey(),mcKeyLength(),mc::platformCrypto(),group)){
     if(!std::strcmp(group.name,s.settings.name)&&group.timestamp<=s.identity.last_time)return;
     if(!remember(hash(group.name,std::strlen(group.name)),group.timestamp,false))return;
-    Record record;record.protocol=s.protocol;record.id=group.timestamp;copy(record.name,sizeof(record.name),group.name);copy(record.text,sizeof(record.text),group.text);addRecord(record);status("Channel message received (claimed sender)");
+    Record record;record.protocol=s.protocol;record.id=group.timestamp;copy(record.name,sizeof(record.name),group.name);copy(record.text,sizeof(record.text),group.text);addRecord(record);++metrics.rx_text;status("Channel message received (claimed sender)");
   }
 }
 } }

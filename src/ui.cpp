@@ -49,6 +49,9 @@ struct Detail {
 char input[128]{};
 size_t inputSize = 0;
 bool dirty = true, wasPressed = false, splashShown = false;
+bool touchReleasePending = false;
+uint32_t touchReleasedAt = 0;
+constexpr uint32_t TOUCH_RELEASE_MS = 60;
 bool powerDialog=false, onboardingShown=false, regionOnboarding=false;
 int regionPage=0, regionSelected=-1;
 constexpr unsigned REGIONS_PER_PAGE=4;
@@ -863,6 +866,7 @@ void begin(Handler handler) {
   bootAt = 0;
   splashShown = false;
   wasPressed = false;
+  touchReleasePending = false; touchReleasedAt = 0;
   page = Page::Home; settingsParent = Page::Home;
   powerDialog=false; onboardingShown=false; regionOnboarding=false;
   tab = 0; reconFilter = 0; reconPage = 0;
@@ -947,12 +951,25 @@ void tick(const Model& model) {
     if(!model.region_selection_made) openRegions(model,true);
   }
   uint16_t x, y;
-  const bool pressed = hw::touch(x, y);
-  if (pressed && !wasPressed) {
-    focusVisible = false; focusIndex = -1;
-    touchAction(x, y, model);
+  const auto touch = hw::readTouch(x, y);
+  // Failed/invalid reports never rearm a held gesture. Only a stable valid
+  // release permits another action; an interruption restarts that interval.
+  // Initial taps stay immediate. This prevents Back or a dragged finger from
+  // selecting another control on a newly opened screen or TX confirmation.
+  if (touch == hw::TouchState::Unavailable) {
+    touchReleasePending = false;
+  } else if (touch == hw::TouchState::Pressed) {
+    if (touchReleasePending && now - touchReleasedAt >= TOUCH_RELEASE_MS) wasPressed = false;
+    touchReleasePending = false;
+    if (!wasPressed) {
+      focusVisible = false; focusIndex = -1;
+      touchAction(x, y, model);
+    }
+    wasPressed = true;
+  } else if (wasPressed) {
+    if (!touchReleasePending) { touchReleasePending = true; touchReleasedAt = now; }
+    else if (now - touchReleasedAt >= TOUCH_RELEASE_MS) { wasPressed = false; touchReleasePending = false; }
   }
-  wasPressed = pressed;
   // Credential screens redraw only on input; capture status refreshes at 2 Hz.
   if (!dirty && (page == Page::Keyboard || page == Page::ReconDetail || now - paintedAt < 500)) return;
   if (!pagePainted || paintedPage != page) fullClearNeeded = true;

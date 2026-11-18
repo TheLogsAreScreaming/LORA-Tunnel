@@ -144,6 +144,7 @@ SPIClass& radioSpi() { return peripheralBus; }
 bool loraFrontendPresent() { return capReady; }
 bool inputReady() { return keyboardReady; }
 bool touchPresent() { return false; }
+TouchState readTouch(uint16_t&, uint16_t&) { return TouchState::Unavailable; }
 bool touch(uint16_t&, uint16_t&) { return false; }
 
 bool pollKeyboard(input::KeyEvent& event) {

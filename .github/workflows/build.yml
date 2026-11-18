@@ -66,6 +66,8 @@ jobs:
         run: python tools/check_messaging.py
       - name: Messaging radio ownership and transmit failure recovery
         run: python tools/check_messaging_radio.py
+      - name: Main action queue diagnostics and messaging command feedback
+        run: python tools/check_main_actions.py
       - name: Cardputer linker policy and real pinned SDK drift checks
         run: python -m unittest discover -s tests -p test_cardputer_linker.py -v
       - name: Cardputer keyboard mapping against pinned upstream headers

@@ -152,6 +152,49 @@ class BenchSerialTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertNotIn("LT RADIO mode=0", output)
 
+    def test_chat_diagnostics_are_numeric_complete_and_filter_private_fields(self):
+        for prefix, fields in (("LT CHAT_ENGINE", bench.CHAT_ENGINE_FIELDS),
+                               ("LT CHAT_ACTION", bench.CHAT_ACTION_FIELDS)):
+            values = dict.fromkeys(fields, 0)
+            if "last_field" in values:
+                values["last_field"] = -1
+                values["last_action"] = 4294967295
+            line = prefix + " " + " ".join(f"{key}={value}" for key, value in values.items())
+            self.assertEqual(bench.parse_chat_diagnostics(line + " key=PRIVATE_TOKEN", prefix, fields), values)
+            for invalid in (line + f" {fields[0]}=0", line.replace(f"{fields[0]}=0", f"{fields[0]}=-1"),
+                            line.replace(f"{fields[0]}=0", f"{fields[0]}=4294967296"),
+                            line.replace(f"{fields[0]}=0", "")):
+                self.assertIsNone(bench.parse_chat_diagnostics(invalid, prefix, fields))
+            result, _, output = self.exercise(responder=lambda *_, line=line:
+                status() + (line + " key=PRIVATE_TOKEN\n").encode())
+            self.assertEqual(result, 0)
+            self.assertIn(prefix, output)
+            self.assertNotIn("PRIVATE_TOKEN", output)
+            result, _, output = self.exercise(responder=lambda *_, line=line: (line + "\n").encode())
+            self.assertNotEqual(result, 0)
+            self.assertNotIn(prefix, output)
+
+    def test_chat_command_requires_matching_fresh_owner_protocol_and_tx_off(self):
+        def reply(owner=2, active=1, tx=0, protocol=1):
+            chat = dict.fromkeys(bench.CHAT_FIELDS, 0)
+            chat.update(owner=owner, active=active, tx=tx, identity_ready=1)
+            radio = dict.fromkeys(bench.RADIO_FIELDS, 0)
+            radio["protocol"] = protocol
+            return (status() + ("LT CHAT " + " ".join(f"{k}={v}" for k, v in chat.items()) + "\n" +
+                    "LT RADIO " + " ".join(f"{k}={v}" for k, v in radio.items()) + "\n").encode())
+        for command, payload, expected in (
+                ("chat-mt", reply(), 0), ("chat-mc", reply(protocol=2), 0),
+                ("chat-stop", reply(owner=0, active=0), 0),
+                ("chat-mt", status(), 3), ("chat-mt", reply(owner=0, active=0), 3),
+                ("chat-mt", reply(tx=1), 3), ("chat-mt", reply(protocol=2), 3),
+                ("chat-stop", reply(), 3)):
+            with self.subTest(command=command, payload=payload):
+                result, _, _ = self.exercise(command=command, responder=lambda *_, p=payload: p)
+                self.assertEqual(result, expected)
+        result, _, _ = self.exercise(command="chat-mt", seconds=5,
+            responder=lambda _, n: reply() if n == 1 else status())
+        self.assertNotEqual(result, 0)
+
     def test_status_then_silence_fails_freshness(self):
         result, _, output = self.exercise(seconds=5, responder=lambda _, count: status() if count == 1 else b"")
         self.assertNotEqual(result, 0)

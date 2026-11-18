@@ -197,29 +197,35 @@ uint8_t navigationButtons() {
   return events;
 }
 
-bool touch(uint16_t& x, uint16_t& y) {
-  if (!hasTouch) return false;
+TouchState readTouch(uint16_t& x, uint16_t& y) {
+  if (!hasTouch) return TouchState::Unavailable;
   // Normal mapped register mode, per CHSC6xxx application note section 1.3.
   Wire.beginTransmission(board::TOUCH_ADDRESS);
   Wire.write(uint8_t{0});
-  if (Wire.endTransmission(true) != 0) return false;
+  if (Wire.endTransmission(true) != 0) return TouchState::Unavailable;
   uint8_t report[7];
   if (Wire.requestFrom(board::TOUCH_ADDRESS, uint8_t{sizeof(report)}, true) !=
       sizeof(report)) {
     while (Wire.available()) Wire.read();
-    return false;
+    return TouchState::Unavailable;
   }
-  for (auto& byte : report) byte = static_cast<uint8_t>(Wire.read());
+  for (auto& byte : report) {
+    const int value = Wire.read();
+    if (value < 0) return TouchState::Unavailable;
+    byte = static_cast<uint8_t>(value);
+  }
   const uint8_t points = report[2] & 0x07;
   const uint8_t event = report[3] >> 6;
-  if (points == 0 || points > 2 || event == 1 || event == 3) return false;
+  if (points > 2 || event == 3) return TouchState::Unavailable;
+  if (points == 0 || event == 1) return TouchState::Released;
   const uint16_t rawX = ((report[3] & 0x0f) << 8) | report[4];
   const uint16_t rawY = ((report[5] & 0x0f) << 8) | report[6];
-  if (rawX >= board::DISPLAY_WIDTH || rawY >= board::DISPLAY_HEIGHT) return false;
+  if (rawX >= board::DISPLAY_WIDTH || rawY >= board::DISPLAY_HEIGHT) return TouchState::Unavailable;
   x = rawX;
   y = rawY;
-  return true;
+  return TouchState::Pressed;
 }
+bool touch(uint16_t& x, uint16_t& y) { return readTouch(x, y) == TouchState::Pressed; }
 
 bool alertAudioReady() { return audioReady; }
 void alertTone(uint16_t frequencyHz, uint16_t durationMs) {

@@ -190,8 +190,38 @@ static void borrowedFrameFailureLifetime(){
   CHECK(mc::directText(peer,local,"second save fails",Epoch+1,0,mc::platformCrypto(),incoming,ack));failSave="contacts-v1";chat::receive(incoming.bytes,incoming.length,7001,Epoch+1);CHECK(!view().identity_ready&&!view().tx_enabled);CHECK(std::memcmp(borrowed,ackCopy.data(),length)==0);
   borrowed=nullptr;length=0;chat::transmitted(false,7002);chat::radioFailure("reply aborted after persistence failure");CHECK(!chat::busy());chat::end();failSave.clear();
 }
+static void diagnosticEvidenceSurvivesExit(){
+  scenario="numeric diagnostics distinguish rejected/queued/completed work";reset();
+  const auto before=chat::diagnostics();REQUIRE(start(Protocol::Meshtastic));
+  CHECK(!chat::send(-1,nullptr,"blocked while TX off",1000,Epoch));
+  CHECK(!chat::announce(1000,Epoch));
+  CHECK(chat::setTransmit(true));
+  CHECK(chat::send(-1,nullptr,"radio failure",2000,Epoch));mt::Frame frame;
+  REQUIRE(take(2000,frame,false));
+  CHECK(chat::send(-1,nullptr,"completed locally",8000,Epoch));REQUIRE(take(8000,frame));
+  CHECK(chat::announce(14000,Epoch));REQUIRE(take(14000,frame));
+  const auto peer=mtPeer();discoverMt(peer,false);
+  mt::Tx options;options.packet_id=987;
+  CHECK(mt::encodeChannelText(channel(),peer,options,"received once",frame,mt::platformCrypto()));
+  chat::receive(frame.bytes,frame.length,15000,Epoch);
+  chat::receive(frame.bytes,frame.length,15001,Epoch); // duplicate frame, not another inbox record
+  const std::uint8_t malformed[]={1,2,3};chat::receive(malformed,sizeof(malformed),15002,Epoch);
+  chat::radioFailure("synthetic radio failure");chat::end();
+  const auto after=chat::diagnostics();
+  CHECK(after.starts-before.starts==1);CHECK(after.stops-before.stops==1);
+  CHECK(after.tx_enable_requests-before.tx_enable_requests==1);CHECK(after.tx_enabled-before.tx_enabled==1);
+  CHECK(after.send_requests-before.send_requests==3);CHECK(after.send_queued-before.send_queued==2);
+  CHECK(after.announce_requests-before.announce_requests==2);CHECK(after.announce_queued-before.announce_queued==1);
+  CHECK(after.tx_ok-before.tx_ok==2);CHECK(after.tx_fail-before.tx_fail==1);
+  CHECK(after.rx_frames-before.rx_frames==4);CHECK(after.rx_nodes-before.rx_nodes==1);CHECK(after.rx_text-before.rx_text==1);
+  CHECK(after.radio_failures-before.radio_failures==1);CHECK(view().history_count==0);
+  // A new UI session must not erase the evidence of a prior failed send.
+  REQUIRE(start(Protocol::Meshtastic));CHECK(!view().tx_enabled);
+  CHECK(chat::diagnostics().send_requests==after.send_requests);CHECK(chat::diagnostics().rx_text==after.rx_text);
+  CHECK(chat::diagnostics().tx_fail==after.tx_fail);chat::end();
+}
 int main(){
-  identityLifecycle();configBoundary();meshcoreTrustAndHistory();meshcoreRetryReceipts();storageFailureAndReplay();meshtasticRuntime();clockAndCancellation();meshtasticRetriesAndUnverifiedReceipts();privateChannelsAndFailures();meshtasticZeroHashChannel();meshcoreClockGate();borrowedFrameFailureLifetime();chat::end();
+  identityLifecycle();configBoundary();meshcoreTrustAndHistory();meshcoreRetryReceipts();storageFailureAndReplay();meshtasticRuntime();clockAndCancellation();meshtasticRetriesAndUnverifiedReceipts();privateChannelsAndFailures();meshtasticZeroHashChannel();meshcoreClockGate();borrowedFrameFailureLifetime();diagnosticEvidenceSurvivesExit();chat::end();
   std::printf("Messaging actual-engine host: %u checks, %u failures; workspace=%zu bytes; zeroized releases=%u\n",checks,failures,chat::workspaceBytes(),released);
   return failures?1:0;
 }

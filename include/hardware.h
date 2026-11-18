@@ -19,6 +19,10 @@ bool inputReady();
 // directions and Backspace repeat after 400 ms, every 80 ms. Text never repeats.
 // This remains available even when optional navigation buttons are disabled.
 bool pollKeyboard(input::KeyEvent& event);
+enum class TouchState : uint8_t { Unavailable, Released, Pressed };
+// Unavailable includes missing hardware and invalid/failed reports. It must not
+// be treated as finger release when debouncing a touchscreen gesture.
+TouchState readTouch(uint16_t& x, uint16_t& y);
 bool touch(uint16_t& x, uint16_t& y);
 bool touchPresent();
 enum NavigationButton : uint8_t { Next = 1, Select = 2, Back = 4 };

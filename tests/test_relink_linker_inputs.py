@@ -1,9 +1,11 @@
 """Release companions must bind the Cardputer linker inputs and exact output."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -34,6 +36,9 @@ class CardputerLinkerCompanionTests(unittest.TestCase):
             "import hashlib,json\nfrom pathlib import Path\n"
             "ROOT=Path(__file__).resolve().parents[1]\n"
             "def generate(sdk,objdump,output):\n"
+            " inputs=ROOT/'expected-tools.json'\n"
+            " if inputs.exists():\n"
+            "  assert json.loads(inputs.read_text())=={'sdk':str(sdk),'objdump':str(objdump)}\n"
             " output.mkdir(parents=True,exist_ok=True)\n"
             " report=json.loads((ROOT/'expected-report.json').read_text())\n"
             " (output/'sections.ld').write_bytes(b'exact portable linker script')\n"
@@ -121,6 +126,95 @@ class CardputerLinkerCompanionTests(unittest.TestCase):
         with patch.object(relink, "cardputer_linker_entries", side_effect=AssertionError("Card hook used")):
             entries = relink.collect(self.root, relink.ENV)
         self.assertFalse(any("cardputer_linker" in name for name, _ in entries))
+
+    def install_core_fixture(self, core, env=relink.ENV):
+        framework = core / "packages/framework-arduinoespressif32"
+        framework.mkdir(parents=True)
+        (framework / "package.json").write_text(json.dumps({"version": "3.3.12"}))
+        (framework / "core-source.cpp").write_text("matching external framework")
+        platform = core / "platforms/espressif32/platform.json"
+        platform.parent.mkdir(parents=True)
+        platform.write_text("{}")
+        tool = core / "packages/toolchain-xtensa-esp-elf/package.json"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("{}")
+        names = relink.CARDPUTER_LIBRARIES if env == relink.CARDPUTER_ENV else relink.LIBRARIES
+        for name in names:
+            folder = self.root / ".pio/libdeps" / env / name
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "library.properties").write_text("version=4.5.0\n")
+            (folder / "source.cpp").write_text("isolated application dependency")
+        return core.resolve()
+
+    def test_explicit_core_does_not_change_source_or_library_root(self):
+        core = self.install_core_fixture(self.root / "external-core")
+        stale = self.root / ".pio-core/packages/framework-arduinoespressif32"
+        stale.mkdir(parents=True)
+        (stale / "package.json").write_text('{"version":"wrong"}')
+        entries = dict(relink.collect(self.root, core_dir=core))
+        self.assertEqual(entries["framework/core-source.cpp"], core / "packages/framework-arduinoespressif32/core-source.cpp")
+        self.assertEqual(entries["sdk-metadata/package.json"], core / "packages/framework-arduinoespressif32-libs/package.json")
+        self.assertEqual(entries["build-metadata/platform.json"], core / "platforms/espressif32/platform.json")
+        self.assertEqual(entries["build-metadata/toolchain-xtensa-esp-elf.json"], core / "packages/toolchain-xtensa-esp-elf/package.json")
+        self.assertEqual(entries["libraries/Crypto/source.cpp"], self.root / ".pio/libdeps" / relink.ENV / "Crypto/source.cpp")
+        self.assertEqual(entries["RELINKING.md"], self.root / "docs/RELINKING.md")
+        self.assertFalse(any(str(core) in name for name in entries))
+
+    def test_cardputer_collector_forwards_explicit_core_and_exact_build(self):
+        core = self.install_core_fixture(self.root / "external-core", relink.CARDPUTER_ENV)
+        with patch.object(relink, "cardputer_linker_entries", return_value=[]) as hook:
+            relink.collect(self.root, relink.CARDPUTER_ENV, self.build, core)
+        hook.assert_called_once_with(self.root, self.build, core)
+
+    def test_cardputer_linker_uses_explicit_sdk_and_objdump(self):
+        core = self.root / "external-core"
+        objdump = core / "packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump.exe"
+        objdump.parent.mkdir(parents=True)
+        objdump.write_bytes(b"fixture executable, never run")
+        (self.root / "expected-tools.json").write_text(json.dumps({
+            "sdk": str(core / "packages/framework-arduinoespressif32-libs/esp32s3"),
+            "objdump": str(objdump),
+        }))
+        entries = dict(relink.cardputer_linker_entries(self.root, self.build, core))
+        self.assertEqual(entries["build-inputs/tools/cardputer_linker.py"], self.root / "tools/cardputer_linker.py")
+
+    def test_explicit_missing_core_fails_without_local_fallback(self):
+        self.install_core_fixture(self.root / ".pio-core")
+        with self.assertRaises(FileNotFoundError):
+            relink.collect(self.root, core_dir=self.root / "missing-core")
+
+    def test_default_core_ignores_platformio_environment(self):
+        core = self.install_core_fixture(self.root / ".pio-core")
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(self.root / "wrong-core")}):
+            entries = dict(relink.collect(self.root))
+        self.assertEqual(entries["framework/package.json"], core / "packages/framework-arduinoespressif32/package.json")
+
+    def test_package_threads_explicit_core_without_changing_root(self):
+        args = SimpleNamespace(root=self.root, output=self.root / "not-created.zip",
+                               env=relink.ENV, build=self.build, core_dir=self.root / "external-core")
+        with patch.object(relink, "collect", side_effect=RuntimeError("collection boundary")) as collect:
+            with self.assertRaisesRegex(RuntimeError, "collection boundary"):
+                relink.package(args)
+        collect.assert_called_once_with(self.root.resolve(), relink.ENV, self.build.resolve(), args.core_dir)
+        self.assertFalse(args.output.exists())
+
+    def test_package_preserves_legacy_namespace_without_core_argument(self):
+        args = SimpleNamespace(root=self.root, output=self.root / "not-created.zip", env=relink.ENV, build=None)
+        with patch.object(relink, "collect", side_effect=RuntimeError("collection boundary")) as collect:
+            with self.assertRaisesRegex(RuntimeError, "collection boundary"):
+                relink.package(args)
+        collect.assert_called_once_with(self.root.resolve(), relink.ENV, self.root / ".pio/build" / relink.ENV, None)
+
+    def test_cli_accepts_explicit_core_path(self):
+        core = self.root / "external core"
+        argv = ["package_relink.py", "package", "0.6.0-dev.chat2", str(self.root / "not-created.zip"),
+                "--root", str(self.root), "--core-dir", str(core), "--build", str(self.build)]
+        with patch.object(sys, "argv", argv), patch.object(relink, "package") as package:
+            relink.main()
+        args = package.call_args.args[0]
+        self.assertEqual(args.core_dir, core)
+        self.assertEqual(args.root, self.root)
+        self.assertEqual(args.build, self.build)
 
 
 if __name__ == "__main__":

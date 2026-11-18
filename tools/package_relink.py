@@ -40,7 +40,7 @@ def files_below(folder):
         yield path, relative.as_posix()
 
 
-def cardputer_linker_entries(root, build):
+def cardputer_linker_entries(root, build, core_dir=None):
     """Recompute pinned policy and map assertions before archiving build evidence."""
     directory = build / "cardputer_linker"
     for name in CARDPUTER_LINKER_OUTPUTS:
@@ -52,8 +52,9 @@ def cardputer_linker_entries(root, build):
     spec = importlib.util.spec_from_file_location("cardputer_linker_package", root / "tools/cardputer_linker.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    sdk = root / ".pio-core/packages/framework-arduinoespressif32-libs/esp32s3"
-    objdump = root / ".pio-core/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump"
+    core = Path(core_dir).resolve() if core_dir is not None else root / ".pio-core"
+    sdk = core / "packages/framework-arduinoespressif32-libs/esp32s3"
+    objdump = core / "packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump"
     if not objdump.is_file():
         objdump = objdump.with_suffix(".exe")
     with tempfile.TemporaryDirectory(prefix="lora-relink-evidence-") as temporary:
@@ -73,8 +74,9 @@ def cardputer_linker_entries(root, build):
     return entries
 
 
-def collect(root, env=ENV, build=None):
-    framework = root / ".pio-core/packages/framework-arduinoespressif32"
+def collect(root, env=ENV, build=None, core_dir=None):
+    core = Path(core_dir).resolve() if core_dir is not None else root / ".pio-core"
+    framework = core / "packages/framework-arduinoespressif32"
     meta = json.loads((framework / "package.json").read_text(encoding="utf-8"))
     if meta.get("version") != "3.3.12":
         raise ValueError("Expected Arduino-ESP32 3.3.12")
@@ -97,20 +99,20 @@ def collect(root, env=ENV, build=None):
     for path, relative in files_below(root / "third_party/licenses"):
         entries.append(("notices/" + relative, path))
     entries.append(("RELINKING.md", root / "docs/RELINKING.md"))
-    sdk = root / ".pio-core/packages/framework-arduinoespressif32-libs"
+    sdk = core / "packages/framework-arduinoespressif32-libs"
     for name in ("package.json", "versions.txt", "esp32s3/dependencies.lock", "esp32s3/sdkconfig"):
         entries.append(("sdk-metadata/" + name, sdk / name))
-    platforms = list((root / ".pio-core/platforms").glob("espressif32*/platform.json"))
+    platforms = list((core / "platforms").glob("espressif32*/platform.json"))
     if len(platforms) != 1:
         raise ValueError("Expected exactly one isolated ESP32 platform")
     entries.append(("build-metadata/platform.json", platforms[0]))
     for package in ("toolchain-xtensa-esp-elf", "tool-esptoolpy", "tool-scons"):
-        path = root / ".pio-core/packages" / package / "package.json"
+        path = core / "packages" / package / "package.json"
         if path.is_file():
             entries.append(("build-metadata/" + package + ".json", path))
     if env == CARDPUTER_ENV:
         build = Path(build) if build is not None else root / ".pio/build" / env
-        entries.extend(cardputer_linker_entries(root, build))
+        entries.extend(cardputer_linker_entries(root, build, core))
     return sorted(entries)
 
 
@@ -141,7 +143,8 @@ def package(args):
     if output.exists():
         raise FileExistsError("Refusing to overwrite an existing companion")
     build = args.build.resolve() if args.build else root / ".pio/build" / args.env
-    entries = collect(root, args.env, build)
+    core_dir = getattr(args, "core_dir", None)
+    entries = collect(root, args.env, build, core_dir)
     firmware = {}
     for name in ("firmware.bin", "firmware.factory.bin", "bootloader.bin", "partitions.bin"):
         data = (build / name).read_bytes()
@@ -193,6 +196,8 @@ def main():
     pack.add_argument("version")
     pack.add_argument("output", type=Path)
     pack.add_argument("--root", type=Path, default=ROOT)
+    pack.add_argument("--core-dir", type=Path,
+                      help="Explicit matching PlatformIO core/dependency directory; defaults to ROOT/.pio-core (environment variables are not used)")
     pack.add_argument("--env", choices=(ENV, CARDPUTER_ENV), default=ENV)
     pack.add_argument("--build", type=Path, help="Exact matching build-output directory; defaults to .pio/build/ENV")
     check = commands.add_parser("verify")

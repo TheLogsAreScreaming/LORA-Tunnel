@@ -70,6 +70,35 @@ class CardputerPackageChecks(unittest.TestCase):
         data, app = factory()
         self.assertEqual(package.validate_factory(data, "0.4.0-beta.1", app), app)
 
+    def test_owner_authorized_release_keeps_exact_install_unverified(self):
+        for target, candidate_usb in ((package.TARGET, False), ("heltec-v4-r8-tft-high-band", True)):
+            record = {"target": target, "version": "0.6.0", "result": "scoped-release",
+                      "factory_sha256": "a" * 64, "app_sha256": "b" * 64,
+                      "publication_authorized": True, "authorized_at": "2026-11-18",
+                      "software_checks_passed": True, "usb_application_verified": False,
+                      "publication_basis": "owner-authorized-software-release",
+                      "authorization_note": "Owner authorized publication with these disclosed limits.",
+                      "unverified_checks": ["Physical installation of the exact release image"],
+                      "candidate_reference": {"target": target, "version": "0.6.0-dev.chat5",
+                                              "source_commit": "c" * 40, "usb_application_verified": candidate_usb}}
+            args = {"target": target, "version": "0.6.0"}
+            self.assertEqual(package.validate_publication(record, "a" * 64, "b" * 64, **args), "scoped-release")
+            self.assertIs(record["usb_application_verified"], False)
+            for field, value in (("publication_basis", ""), ("authorization_note", ""),
+                                 ("publication_authorized", False), ("software_checks_passed", False),
+                                 ("usb_application_verified", None), ("factory_sha256", "d" * 64),
+                                 ("unverified_checks", ["Other pending check"]), ("candidate_reference", {})):
+                with self.subTest(target=target, field=field), self.assertRaises(ValueError):
+                    package.validate_publication(dict(record, **{field: value}), "a" * 64, "b" * 64, **args)
+            for field, value in (("target", "different-board"), ("source_commit", "short"),
+                                 ("usb_application_verified", None), ("version", "")):
+                changed = dict(record, candidate_reference=dict(record["candidate_reference"], **{field: value}))
+                with self.subTest(candidate_field=field), self.assertRaises(ValueError):
+                    package.validate_publication(changed, "a" * 64, "b" * 64, **args)
+            with self.assertRaises(ValueError):
+                package.validate_publication(dict(record, result="scoped-beta", version="0.6.0-beta.1"),
+                                             "a" * 64, "b" * 64, target=target, version="0.6.0-beta.1")
+
     def test_wrong_board_same_version_is_rejected(self):
         data, _ = factory(image(b"heltec-v4-r8-tft\0" + b"0.4.0-beta.1\0"))
         with self.assertRaisesRegex(ValueError, "target identity"):

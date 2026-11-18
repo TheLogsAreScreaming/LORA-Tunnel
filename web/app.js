@@ -4,8 +4,8 @@
   const selector = el("target-select"), confirm = el("confirm-target");
   const installer = el("installer"), status = el("install-status");
   const targets = {
-    "heltec-v4-r8-tft-high-band": {flash: 16777216, psram: 8388608, version: "0.5.0", channel: "stable"},
-    "cardputer-adv-lora1262": {flash: 8388608, psram: 0, version: "0.5.0", channel: "stable"}
+    "heltec-v4-r8-tft-high-band": {flash: 16777216, psram: 8388608, version: "0.6.0", channel: "stable"},
+    "cardputer-adv-lora1262": {flash: 8388608, psram: 0, version: "0.6.0", channel: "stable"}
   };
   let catalog, ready = false, selection = 0, reason = "Checking release metadata…";
   const localAcceptance = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname) &&
@@ -37,7 +37,7 @@
           r.guide !== "targets/" + r.target + "/guides/" + (r.target === "cardputer-adv-lora1262" ? "CARDPUTER_ADV" : "USER_GUIDE") + ".html") {
         throw new Error("Release metadata mismatch");
       }
-      if (r.target === "cardputer-adv-lora1262" && (!safeName(r.app_file) || !hash(r.app_sha256))) throw new Error("Launcher metadata mismatch");
+      if ((r.target === "cardputer-adv-lora1262" || r.app_file !== undefined) && (!safeName(r.app_file) || !hash(r.app_sha256))) throw new Error("Launcher metadata mismatch");
       const response = await fetch(r.manifest, {cache: "no-store"});
       if (!response.ok) throw new Error("Manifest unavailable");
       const manifest = await response.json();

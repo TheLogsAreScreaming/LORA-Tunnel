@@ -7,5 +7,9 @@
   Cache-Control: no-cache
 /release.json
   Cache-Control: no-cache
+/catalog.json
+  Cache-Control: no-cache
+/firmware/*
+  Cache-Control: no-cache
 /downloads/*
   Cache-Control: public, max-age=3600

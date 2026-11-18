@@ -137,11 +137,29 @@ def validate_publication(record, factory_sha, app_sha, *, target=TARGET, version
         require(release_channel(version) == "beta", "Beta authorization cannot publish a stable release")
     require(record.get("publication_authorized") is True and bool(record.get("authorized_at")),
             "Publication needs explicit authorization")
-    require(record.get("software_checks_passed") is True and record.get("usb_application_verified") is True,
-            "Publication needs verified software and USB application evidence")
+    require(record.get("software_checks_passed") is True,
+            "Publication needs verified software checks")
     limits = record.get("unverified_checks")
     require(isinstance(limits, list) and bool(limits) and all(isinstance(x, str) and x.strip() for x in limits),
             "Publication must disclose unverified checks")
+    if record.get("usb_application_verified") is not True:
+        # Explicit owner authorization can release software without claiming
+        # that the rebuilt release image was physically installed. Candidate
+        # evidence is recorded separately for each board, never inherited.
+        require(result == "scoped-release" and record.get("usb_application_verified") is False and
+                record.get("publication_basis") == "owner-authorized-software-release",
+                "Publication needs USB evidence or explicit software-release authorization")
+        note = record.get("authorization_note")
+        require(isinstance(note, str) and bool(note.strip()), "Software release needs an authorization note")
+        require("Physical installation of the exact release image" in limits,
+                "Software release must disclose unverified exact-image installation")
+        candidate = record.get("candidate_reference", {})
+        require(isinstance(candidate, dict) and candidate.get("target") == target and
+                isinstance(candidate.get("version"), str) and bool(candidate["version"].strip()) and
+                isinstance(candidate.get("source_commit"), str) and
+                bool(re.fullmatch(r"[0-9a-f]{40}", candidate["source_commit"])) and
+                isinstance(candidate.get("usb_application_verified"), bool),
+                "Software release needs a board-specific candidate reference")
     return result
 
 

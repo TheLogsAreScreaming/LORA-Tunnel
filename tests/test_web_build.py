@@ -160,6 +160,53 @@ class WebReleaseChecks(unittest.TestCase):
                 with self.subTest(link=link), self.assertRaisesRegex(ValueError, "Missing local link"):
                     web.check_links(root)
 
+    def test_retained_downloads_preserve_bytes_and_reject_replacement(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            old = root / "LORA-Tunnel-0.5.0-source.zip"
+            old.write_bytes(b"previous public artifact")
+            entry = {"path": old.name, "sha256": web.digest(old.read_bytes())}
+            web.retain_downloads([entry], root, downloads)
+            self.assertEqual((downloads / old.name).read_bytes(), old.read_bytes())
+            web.retain_downloads([entry], root, downloads)
+            with self.assertRaisesRegex(ValueError, "unique versioned"):
+                web.retain_downloads([entry, entry], root, downloads)
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                web.retain_downloads([dict(entry, sha256="0" * 64)], root, downloads)
+            (downloads / old.name).write_bytes(b"different release payload")
+            with self.assertRaisesRegex(ValueError, "replace a different"):
+                web.retain_downloads([entry], root, downloads)
+            private = root / "config.json"
+            private.write_bytes(b"not an allowed publication filename")
+            with self.assertRaisesRegex(ValueError, "versioned artifact"):
+                web.retain_downloads([{"path": private.name, "sha256": web.digest(private.read_bytes())}], root, downloads)
+
+    def test_heltec_launcher_download_uses_matching_application_and_guide(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = self.image()
+            entry = {"target": web.TARGET, "version": "0.2.2-beta.1", "source_commit": "a" * 40,
+                     "public_enabled": False, "factory": "factory.bin", "app": "app.bin",
+                     "source": "LORA-Tunnel-0.2.2-beta.1-source.zip",
+                     "relink": "LORA-Tunnel-0.2.2-beta.1-relink.zip"}
+            for kind, payload in (("factory", data), ("app", data[0x10000:]), ("source", b"fixture")):
+                (root / entry[kind]).write_bytes(payload)
+                entry[kind + "_sha256"] = web.digest(payload)
+            with zipfile.ZipFile(root / entry["relink"], "w") as archive:
+                archive.writestr("LORA-Tunnel-relink/MANIFEST.json", json.dumps({"release": entry["version"],
+                    "matching_firmware": {"firmware.factory.bin": {"sha256": entry["factory_sha256"]}}}))
+            entry["relink_sha256"] = web.digest((root / entry["relink"]).read_bytes())
+            with patch.object(web, "read_source", return_value={}), patch.object(web, "validate_commit"):
+                release, _, app, *_ = web.prepare_target(entry, root, "https://github.com/example/project", True)
+                self.assertEqual(app, data[0x10000:])
+                self.assertTrue(release["app_file"].endswith("-LAUNCHER-APP.bin"))
+                self.assertTrue(release["guide"].endswith("/USER_GUIDE.html"))
+                (root / entry["app"]).write_bytes(b"wrong board image")
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                    web.prepare_target(entry, root, "https://github.com/example/project", True)
+
 
 if __name__ == "__main__":
     unittest.main()

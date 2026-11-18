@@ -27,7 +27,7 @@ VERSION_RE = re.compile(r'#define TUNNEL_VERSION "([0-9]+\.[0-9]+\.[0-9]+(?:-bet
 GUIDES = ("USER_GUIDE", "UI_GUIDE", "HARDWARE", "WEB_FLASHER", "RECOVERY",
           "EXPORTS", "RECON", "THIRD_PARTY", "VALIDATION", "LOG_FORMAT",
           "ARCHITECTURE", "TEST_CHECKLIST", "GPS_DIAGNOSTICS", "LORA", "RELINKING", "REGIONS",
-          "COMBINED_MESH", "COMBINED_MESH_VALIDATION", "RELEASE_0_5_0", "MESSAGING")
+          "COMBINED_MESH", "COMBINED_MESH_VALIDATION", "RELEASE_0_5_0", "RELEASE_0_6_0", "MESSAGING")
 
 
 import sys
@@ -288,6 +288,10 @@ def prepare_target(entry, base, github, local_preview):
     else:
         if digest(factory[0x10000:]) != entry.get("app_sha256"):
             raise ValueError("Heltec application does not match the publication record")
+        if entry.get("app"):
+            _, app = checked_file(entry["app"], entry["app_sha256"], base)
+            if app != factory[0x10000:]:
+                raise ValueError("Heltec Launcher image must be the matching factory application")
         if public_enabled:
             if not entry.get("acceptance"):
                 raise ValueError("Heltec public release requires a publication record")
@@ -305,7 +309,7 @@ def prepare_target(entry, base, github, local_preview):
                "sd_file": f"LORA-Tunnel-{version}-SD-setup.zip",
                "relink_url": relink_url, "relink_sha256": entry["relink_sha256"],
                "public_enabled": public_enabled, "hardware_validation": validation_status if public_enabled else "pending",
-               "guide": f"targets/{target}/guides/" + ("CARDPUTER_ADV.html" if app is not None else "USER_GUIDE.html"),
+               "guide": f"targets/{target}/guides/" + ("CARDPUTER_ADV.html" if target == cardputer.TARGET else "USER_GUIDE.html"),
                "manifest": f"firmware/{target}/manifest.json"}
     if app_name:
         release.update(app_file=app_name, app_sha256=entry["app_sha256"], app_bytes=len(app))
@@ -325,6 +329,25 @@ def write_sd_starter(path, sources, existing=None):
     if path.exists() and path.read_bytes() != existing:
         raise ValueError("Targets disagree on the shared SD starter")
     path.write_bytes(existing)
+
+
+def retain_downloads(entries, base, downloads):
+    """Keep existing versioned public URLs, checking their known published hashes."""
+    if not isinstance(entries, list):
+        raise ValueError("Retained downloads must be a list")
+    seen = set()
+    for entry in entries:
+        path, data = checked_file(entry["path"], entry["sha256"], base)
+        name = path.name
+        if not re.fullmatch(r"LORA-Tunnel-[0-9][A-Za-z0-9_.-]*\.(?:bin|zip|txt)", name) or name.casefold() in seen:
+            raise ValueError("Retained downloads need unique versioned artifact names")
+        seen.add(name.casefold())
+        target = downloads / name
+        if target.exists() and target.read_bytes() != data:
+            raise ValueError("Retained download would replace a different artifact")
+        if len(data) > MAX_FILE:
+            raise ValueError("Retained download exceeds hosting file-size limit")
+        target.write_bytes(data)
 
 
 def build(args):
@@ -397,6 +420,7 @@ def build(args):
             write_json(output / "firmware/manifest.json", legacy_manifest)
             write_json(output / "release.json", release)
         releases.append(release)
+    retain_downloads(spec.get("retained_downloads", []), base, downloads)
     sums = {p.name: digest(p.read_bytes()) for p in sorted(downloads.iterdir())}
     (downloads / "SHA256SUMS.txt").write_text("".join(f"{h}  {n}\n" for n, h in sums.items()), encoding="ascii")
     catalog = {"schema": 2, "site_version": site["version"], "site_commit": site["source_commit"],

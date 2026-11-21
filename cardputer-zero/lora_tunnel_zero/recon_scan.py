@@ -210,41 +210,46 @@ class BleScanner:
         self.started = False
 
     def open(self):
+        """Connect to BlueZ and start LE discovery. Safe to call again after a refusal."""
         try:
             import dbus
         except ImportError as exc:
             raise ReconUnavailable("BLE needs python3-dbus") from exc
         self.dbus = dbus
         try:
-            self.bus = dbus.SystemBus()
-            manager = dbus.Interface(self.bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
+            bus = dbus.SystemBus()
+            manager = dbus.Interface(bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
             objects = manager.GetManagedObjects()
         except dbus.exceptions.DBusException as exc:
+            if "AccessDenied" in str(exc.get_dbus_name()):
+                raise ReconUnavailable(ble_refusal(exc.get_dbus_name())) from exc
             raise ReconUnavailable("Bluetooth service (bluetoothd) is not running") from exc
         path = next((p for p, ifaces in objects.items() if "org.bluez.Adapter1" in ifaces), None)
         if path is None:
             raise ReconUnavailable("No Bluetooth adapter found")
-        self.manager = manager
-        self.adapter_path = path
-        self.adapter = dbus.Interface(self.bus.get_object("org.bluez", path), "org.bluez.Adapter1")
-        props = dbus.Interface(self.bus.get_object("org.bluez", path), "org.freedesktop.DBus.Properties")
+        adapter = dbus.Interface(bus.get_object("org.bluez", path), "org.bluez.Adapter1")
+        props = dbus.Interface(bus.get_object("org.bluez", path), "org.freedesktop.DBus.Properties")
         try:
             if not props.Get("org.bluez.Adapter1", "Powered"):
                 props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True))
-            self.adapter.SetDiscoveryFilter({"Transport": dbus.String("le"), "DuplicateData": dbus.Boolean(True)})
-            self.adapter.StartDiscovery()
-            self.started = True
+            adapter.SetDiscoveryFilter({"Transport": dbus.String("le"), "DuplicateData": dbus.Boolean(True)})
+            adapter.StartDiscovery()
         except dbus.exceptions.DBusException as exc:
             if "InProgress" not in str(exc.get_dbus_name()):
                 raise ReconUnavailable(ble_refusal(exc.get_dbus_name(), str(exc))) from exc
+        # Only a fully started scanner is kept, so a refusal (Bluetooth blocked, adapter
+        # still powering up) is retried on the next scan instead of silently finding nothing.
+        self.bus, self.manager, self.adapter_path, self.adapter = bus, manager, path, adapter
+        self.started = True
         return self
 
     def scan(self):
-        if self.bus is None:
+        if not self.started:
             self.open()
         try:
             objects = self.manager.GetManagedObjects()
         except self.dbus.exceptions.DBusException as exc:
+            self.close()
             raise ReconUnavailable("Bluetooth service stopped") from exc
         seen = []
         for path, interfaces in objects.items():
@@ -269,6 +274,7 @@ class BleScanner:
             except Exception:
                 pass
         self.started = False
+        self.bus = self.adapter = None
 
 
 # ------------------------------------------------------------------ alerts

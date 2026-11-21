@@ -274,5 +274,80 @@ class BleRefusalTests(unittest.TestCase):
         self.assertIn("(Weird)", ble_refusal("org.bluez.Error.Weird"))
 
 
+class BleScannerRetryTests(unittest.TestCase):
+    """A refused start (Bluetooth blocked) must be retried, not leave a silent scanner."""
+
+    def fake_dbus(self, refusals):
+        import types
+        dbus = types.ModuleType("dbus")
+
+        class DBusException(Exception):
+            def __init__(self, name):
+                super().__init__(name)
+                self.name = name
+
+            def get_dbus_name(self):
+                return self.name
+
+        dbus.exceptions = types.SimpleNamespace(DBusException=DBusException)
+        dbus.Boolean, dbus.String = bool, str
+        state = {"refusals": refusals, "starts": 0}
+        objects = {"/org/bluez/hci0": {"org.bluez.Adapter1": {}},
+                   "/org/bluez/hci0/dev_58_8E_81_A0_12_34": {"org.bluez.Device1": {
+                       "Address": "58:8E:81:A0:12:34", "AddressType": "public", "RSSI": -60,
+                       "Name": "Penguin-1234567890", "ManufacturerData": {0x09C8: b"\x01\x02"}}}}
+
+        class Iface:
+            def __init__(self, obj, name):
+                self.name = name
+
+            def GetManagedObjects(self):
+                return objects
+
+            def Get(self, iface, prop):
+                return True
+
+            def Set(self, *args):
+                pass
+
+            def SetDiscoveryFilter(self, flt):
+                pass
+
+            def StartDiscovery(self):
+                if state["refusals"]:
+                    state["refusals"] -= 1
+                    raise DBusException("org.bluez.Error.Blocked")
+                state["starts"] += 1
+
+            def StopDiscovery(self):
+                pass
+
+        class Bus:
+            def get_object(self, *args):
+                return object()
+
+        dbus.SystemBus = Bus
+        dbus.Interface = Iface
+        return dbus, state
+
+    def test_retries_after_bluetooth_is_unblocked(self):
+        import sys
+        from unittest.mock import patch
+        from lora_tunnel_zero.recon_scan import BleScanner, ReconUnavailable
+        dbus, state = self.fake_dbus(refusals=1)
+        with patch.dict(sys.modules, {"dbus": dbus}):
+            scanner = BleScanner()
+            with self.assertRaises(ReconUnavailable) as caught:
+                scanner.scan()
+            self.assertIn("rfkill unblock", str(caught.exception))
+            found = scanner.scan()
+            self.assertEqual(state["starts"], 1)
+            self.assertEqual([d["address"] for d in found], ["58:8E:81:A0:12:34"])
+            scanner.close()
+            self.assertFalse(scanner.started)
+            scanner.scan()
+            self.assertEqual(state["starts"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

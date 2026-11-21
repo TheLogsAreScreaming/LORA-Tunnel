@@ -1,0 +1,35 @@
+{
+  "package_name": "lora-tunnel",
+  "version": "1.0.0",
+  "app_name": "LORA Tunnel",
+  "bin_name": "lora-tunnel",
+  "description": "LoRa mesh wardriving, Meshtastic and MeshCore decoding, LoRaTAP PCAP logging (Cap LoRa-1262)",
+  "store": {
+    "summary": "LoRa mesh wardriver: Meshtastic + MeshCore decode, GPS, PCAP/Kismet-style logs",
+    "description": "LORA Tunnel turns the CardputerZero and Cap LoRa-1262 into a standalone LoRa mesh wardriver. Pick your region and it listens for Meshtastic, MeshCore, both in turn, or surveys every preset to find what your community uses. It decrypts the default channels and any private channel keys you add: node names, roles, positions, telemetry and channel messages. Every frame is saved with its raw bytes and exact radio settings, with your GPS position kept separate from what nodes claim. Logs are JSONL, SQLite and LoRaTAP PCAP (open in Wireshark), with CSV and Google Earth KML export. Same channel plan as Kismet's LoRaPipe; a LoRaPipe USB radio also works. Receive only in this version.",
+    "categories": ["Radio & Comms", "Security"],
+    "screenshots": [
+      "screenshots/wardrive-live.png",
+      "screenshots/nodes.png",
+      "screenshots/messages.png",
+      "screenshots/packet-detail.png",
+      "screenshots/home.png",
+      "screenshots/settings.png"
+    ],
+    "icon": "packaging/icon.png",
+    "license": "MIT",
+    "source_repo": "https://github.com/valleytechsolutions/LORA-Tunnel",
+    "author": { "github": "valleytechsolutions", "display_name": "Valleytech Solutions" },
+    "share_code": "LORA",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": false,
+      "additional_hardware": true,
+      "background_service": false,
+      "external_display": false
+    },
+    "locales": {}
+  }
+}

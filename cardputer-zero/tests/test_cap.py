@@ -89,6 +89,8 @@ class CapTest(unittest.TestCase):
             out[3:] = self.packet
         elif opcode == 0x14:
             out[2:] = bytes((177, 246, 155))
+        elif opcode == 0x83 and not getattr(self, "tx_hangs", False):
+            self.irq = 0x0001  # TX_DONE
         return list(out)
 
     def test_open_retune_and_close(self):
@@ -184,6 +186,36 @@ class CapTest(unittest.TestCase):
             with self.assertRaises(RadioError):
                 self.radio._command(opcode)
         self.spi.xfer2.assert_not_called()
+
+    def test_transmit_needs_permission_and_returns_to_receive(self):
+        self.radio.open()
+        self.spi.xfer2.reset_mock()
+        with self.assertRaises(RadioError):
+            self.radio.transmit(b"hello")
+        self.assertFalse(any(c.args[0][0] in (0x0E, 0x83) for c in self.spi.xfer2.call_args_list))
+        self.radio.allow_tx = True
+        self.radio.transmit(b"hello", self.profiles[0], power_dbm=30)
+        calls = [c.args[0] for c in self.spi.xfer2.call_args_list]
+        self.assertIn([0x0E, 0x00] + list(b"hello"), calls)
+        self.assertIn([0x8E, 22, 0x04], calls)            # clamped to the SX1262 maximum
+        self.assertIn([0x95, 0x04, 0x07, 0x00, 0x01], calls)
+        tx_params = [c for c in calls if c[0] == 0x8C]
+        self.assertEqual(tx_params[0][4], 5)               # payload length for TX
+        self.assertEqual(tx_params[-1][4], 255)            # back to RX framing
+        self.assertEqual(calls[-1], [0x82, 0xFF, 0xFF, 0xFF])
+        self.assertEqual(self.radio.diagnostics["transmitted"], 1)
+        with self.assertRaises(RadioError):                # window closes after the send
+            self.radio._command(0x83, b"\x00\x00\x00")
+
+    def test_transmit_timeout_still_resumes_receive(self):
+        self.radio.open()
+        self.radio.allow_tx = True
+        self.tx_hangs = True
+        clock = iter(range(0, 1000, 5))
+        with patch.object(cap.time, "monotonic", lambda: next(clock)):
+            with self.assertRaises(RadioError):
+                self.radio.transmit(b"x", timeout=1)
+        self.assertEqual(self.spi.xfer2.call_args_list[-1].args[0], [0x82, 0xFF, 0xFF, 0xFF])
 
     def test_bookworm_gpio_and_system_smbus_bindings(self):
         chip = Mock()

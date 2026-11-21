@@ -111,6 +111,9 @@ class DemoRadio:
         self._packet = 0x1000
         self._mc = [_MeshCoreIdentity(name, kind, name.encode()) for name, kind in MC_NODES]
         self.base = (37.7749, -122.4194)
+        self.allow_tx = False
+        self.sent = []
+        self._echo = []   # (due, frame): a neighbour repeating what we sent
 
     def open(self):
         return self
@@ -121,6 +124,27 @@ class DemoRadio:
     def tune(self, profile):
         self.profile = validate_profile(profile)
         self.diagnostics["retunes"] += 1
+
+    def transmit(self, payload, profile=None, power_dbm=14, timeout=8.0):
+        """Pretend to transmit; a synthetic neighbour repeats the frame shortly after."""
+        from . import RadioError
+        if not self.allow_tx:
+            raise RadioError("Transmit is turned off in Settings")
+        if profile is not None and profile != self.profile:
+            self.tune(profile)
+        frame = bytes(payload)
+        self.sent.append((frame, self.profile.id, power_dbm))
+        if self.profile.protocol == "meshtastic" and len(frame) > 16:
+            relayed = bytearray(frame)
+            hop_limit = relayed[12] & 7
+            relayed[12] = (relayed[12] & 0xF8) | max(0, hop_limit - 1)
+            relayed[15] = 0xC4  # the relaying node's last byte
+            self._echo.append((self.clock() + 1.2, bytes(relayed), self.profile))
+        elif self.profile.protocol == "meshcore" and len(frame) > 3:
+            relayed = frame[:1] + b"\x01\x5a" + frame[2:]
+            self._echo.append((self.clock() + 1.6, relayed, self.profile))
+        self.diagnostics["transmitted"] = self.diagnostics.get("transmitted", 0) + 1
+        return 0.2
 
     def __enter__(self):
         return self.open()
@@ -163,6 +187,12 @@ class DemoRadio:
 
     def receive(self, timeout=0.25):
         now = self.clock()
+        self._echo = [e for e in self._echo if now - e[0] < 30]
+        # A repeat is only heard while tuned to the profile it was sent on.
+        if self._echo and self._echo[0][0] <= now and self._echo[0][2] == self.profile:
+            _, raw, _ = self._echo.pop(0)
+            return {"timestamp": now, "profile": self.profile.to_dict(), "raw_hex": raw.hex(),
+                    "rssi_dbm": -84.0, "snr_db": 6.5, "crc_ok": True, "synthetic": True}
         if now < self._next:
             time.sleep(min(timeout, max(0.0, self._next - now)))
             if self.clock() < self._next:
@@ -174,3 +204,86 @@ class DemoRadio:
         return {"timestamp": self.clock(), "profile": self.profile.to_dict(), "raw_hex": raw.hex(),
                 "rssi_dbm": rssi, "snr_db": round(max(-18, min(12, (rssi + 112) / 4 + self.random.uniform(-3, 3))), 2),
                 "crc_ok": True, "synthetic": True}
+
+
+# ------------------------------------------------------------------ Recon demo
+def _ad(kind, data):
+    return bytes((len(data) + 1, kind)) + bytes(data)
+
+
+def _odid_location(lat, lon, alt=95.0, speed=8.0):
+    body = struct.pack("<BBBBbiiHHHBBHB", 0x12, 0x20, 120, int(speed / 0.25), 2, int(lat * 1e7), int(lon * 1e7),
+                       int((alt + 1000) * 2), int((alt + 1000) * 2), int(1050 * 2), 0x3b, 0x22, 900, 0)
+    return body.ljust(25, b"\x00")[:25]
+
+
+def _odid_basic(serial):
+    return bytes((0x02, 0x12)) + serial.encode().ljust(20, b"\x00") + b"\x00" * 3
+
+
+class DemoWifi:
+    """Synthetic AP list for demos and screenshots. Not real networks."""
+
+    name = "Wi-Fi"
+
+    def __init__(self, seed=11):
+        self.random = random.Random(seed)
+        self.networks = [
+            ("00:04:7D:3A:91:20", "MSI-ALPR-0420", 6, "WPA2/3"),
+            ("70:C9:4E:12:5C:01", "Flock-5C01", 1, "WPA2/3"),
+            ("00:25:DF:4B:02:7E", "AXON-FLEET", 11, "WPA2/3"),
+            ("00:40:8C:77:10:AA", "AXIS-CAM-10AA", 6, "WPA2/3"),
+            ("3C:84:6A:10:20:30", "HomeNet-5G", 36, "WPA2/3"),
+            ("F0:9F:C2:55:01:02", "CoffeeShop Guest", 1, "open"),
+            ("A4:2B:B0:11:22:33", "NETGEAR42", 11, "WPA2/3"),
+            ("B8:27:EB:01:02:03", "pwned-by-pager", 6, "open"),
+        ]
+
+    def available(self):
+        return True
+
+    def scan(self):
+        out = []
+        for bssid, ssid, channel, security in self.networks:
+            if self.random.random() < 0.9:
+                freq = 5000 + channel * 5 if channel > 14 else 2407 + channel * 5
+                out.append({"bssid": bssid, "ssid": ssid, "channel": channel, "frequency": freq,
+                            "security": security, "rssi": round(self.random.uniform(-88, -42))})
+        return out
+
+    def close(self):
+        pass
+
+
+class DemoBle:
+    """Synthetic BLE advertisements, built in real AD formats. Not real devices."""
+
+    name = "BLE"
+
+    def __init__(self, seed=13, base=(37.7790, -122.4170)):
+        self.random = random.Random(seed)
+        lat, lon = base
+        rid = _ad(0x16, bytes((0xfa, 0xff, 0x0d, 0x03)) + bytes((0xF2, 25, 2)) +
+                  _odid_basic("1581F5FKD229400DEMO") + _odid_location(lat + 0.0012, lon - 0.0009))
+        self.devices = [
+            ("58:8E:81:A0:12:34", 0, _ad(9, b"Penguin-1234567890") + _ad(0xff, b"\xc8\x09\x01\x02")),
+            ("5A:3C:11:9D:20:7F", 1, _ad(0xff, b"\x4c\x00\x12\x19" + bytes(range(25)))),
+            ("00:25:DF:66:01:02", 0, _ad(0xff, b"\x4d\x03\x01") + _ad(3, b"\x81\xfc")),
+            ("60:60:1F:AB:CD:EF", 1, rid),
+            ("C2:11:22:33:44:55", 1, _ad(3, b"\x5a\xfd") + _ad(9, b"Galaxy SmartTag2")),
+            ("E4:5F:01:AA:BB:CC", 0, _ad(0xff, b"\x4c\x00\x02\x15" + bytes(range(16)) + b"\x00\x01\x00\x02\xc5")),
+            ("D8:3A:DD:10:20:30", 1, _ad(9, b"Pixel Buds")),
+            ("F1:22:33:44:55:66", 1, _ad(3, b"\x81\x30") + _ad(0x19, b"\x00\x86") + _ad(9, b"Flipper Demo")),
+            ("C8:3F:26:01:02:03", 1, _ad(0xff, b"\x06\x00\x01\x09\x20\x02")),
+        ]
+
+    def scan(self):
+        out = []
+        for address, kind, ad in self.devices:
+            if self.random.random() < 0.85:
+                out.append({"address": address, "address_type": kind, "raw_ad": ad,
+                            "rssi": round(self.random.uniform(-95, -48)), "name": ""})
+        return out
+
+    def close(self):
+        pass

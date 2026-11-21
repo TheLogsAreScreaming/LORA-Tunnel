@@ -110,5 +110,42 @@ def arrow(d, x, y, s, color, degrees):
     d.polygon(pts, fill=color)
 
 
-ICONS = {"radio": radio, "nodes": nodes, "chat": chat, "folder": folder, "sliders": sliders,
+def eye(d, x, y, s, color):
+    """Counter-surveillance: an eye inside a radar ring."""
+    cx, cy = x + s * 0.5, y + s * 0.5
+    lw = max(1, int(s * 0.07))
+    d.chord((x + s * 0.06, y + s * 0.22, x + s * 0.94, y + s * 1.02), 200, 340, fill=color)
+    d.chord((x + s * 0.06, y - s * 0.02, x + s * 0.94, y + s * 0.78), 20, 160, fill=color)
+    r = s * 0.17
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(4, 7, 10))
+    r = s * 0.08
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
+    _arc(d, cx, cy, s * 0.48, 215, 325, color, lw)
+
+
+def alert(d, x, y, s, color):
+    d.polygon([(x + s * 0.5, y + s * 0.06), (x + s * 0.96, y + s * 0.90), (x + s * 0.04, y + s * 0.90)], fill=color)
+    lw = max(1, int(s * 0.10))
+    d.line((x + s * 0.5, y + s * 0.34, x + s * 0.5, y + s * 0.62), fill=(4, 7, 10), width=lw)
+    r = s * 0.06
+    d.ellipse((x + s * 0.5 - r, y + s * 0.74 - r, x + s * 0.5 + r, y + s * 0.74 + r), fill=(4, 7, 10))
+
+
+def send(d, x, y, s, color):
+    d.polygon([(x + s * 0.06, y + s * 0.12), (x + s * 0.94, y + s * 0.50), (x + s * 0.06, y + s * 0.88),
+               (x + s * 0.20, y + s * 0.50)], fill=color)
+    d.line((x + s * 0.20, y + s * 0.50, x + s * 0.55, y + s * 0.50), fill=(4, 7, 10), width=max(1, int(s * 0.07)))
+
+
+def keyboard(d, x, y, s, color):
+    d.rounded_rectangle((x + s * 0.04, y + s * 0.24, x + s * 0.96, y + s * 0.80), radius=s * 0.08, fill=color)
+    k = s * 0.10
+    for row, count in ((0.34, 6), (0.50, 5)):
+        for i in range(count):
+            kx = x + s * (0.12 + i * 0.14 + (0.07 if count == 5 else 0))
+            d.rectangle((kx, y + s * row, kx + k, y + s * row + k), fill=(4, 7, 10))
+    d.rectangle((x + s * 0.28, y + s * 0.66, x + s * 0.72, y + s * 0.72), fill=(4, 7, 10))
+
+
+ICONS = {"eye": eye, "alert": alert, "send": send, "keyboard": keyboard, "radio": radio, "nodes": nodes, "chat": chat, "folder": folder, "sliders": sliders,
          "satellite": satellite, "scan": scan, "shield": shield, "record": record, "pin": pin}

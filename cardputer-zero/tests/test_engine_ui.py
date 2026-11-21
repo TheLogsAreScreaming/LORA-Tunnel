@@ -152,7 +152,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(app.cfg["region"], "US")
         app.open("Settings")
         settings = app.screen
-        settings.index = 1                                    # scan mode
+        settings.index = 2                                    # scan mode (row 0 is a header)
         settings.handle(ScriptedInput(["ENTER"]).queue[0], app)
         self.assertIsInstance(app.screen, screens.Picker)
         app.screen.index = 3                                  # survey

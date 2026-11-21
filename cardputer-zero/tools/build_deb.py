@@ -18,7 +18,9 @@ HERE = Path(__file__).resolve().parents[1]
 PREFIX = "usr/share/APPLaunch"
 MAINTAINER = "Valleytech Solutions <178694271+valleytechsolutions@users.noreply.github.com>"
 DEPENDS = ("python3 (>= 3.9), python3-pil, python3-numpy, python3-serial, python3-spidev, "
-           "python3-smbus | python3-smbus2, python3-libgpiod, python3-cryptography")
+           "python3-smbus | python3-smbus2, python3-libgpiod, python3-cryptography, python3-dbus")
+# Recon scans Wi-Fi through NetworkManager or iw and BLE through BlueZ; alerts play through ALSA.
+RECOMMENDS = "network-manager | iw, bluez, alsa-utils"
 
 
 def build(out):
@@ -54,10 +56,10 @@ def build(out):
         size = sum(f.stat().st_size for f in stage.rglob("*") if f.is_file()) // 1024
         (control / "control").write_text(
             "Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: %s\nInstalled-Size: %d\n"
-            "Depends: %s\nSection: APPLaunch\nPriority: optional\n"
+            "Depends: %s\nRecommends: %s\nSection: APPLaunch\nPriority: optional\n"
             "Homepage: https://github.com/valleytechsolutions/LORA-Tunnel\n"
             "Description: %s\n LORA Tunnel for M5Stack CardputerZero with the Cap LoRa-1262.\n"
-            % (pkg, version, MAINTAINER, size, DEPENDS, manifest["description"]))
+            % (pkg, version, MAINTAINER, size, DEPENDS, RECOMMENDS, manifest["description"]))
         shutil.copy2(HERE / "packaging" / "postinst", control / "postinst")
         (control / "postinst").chmod(0o755)
         for path in stage.rglob("*"):

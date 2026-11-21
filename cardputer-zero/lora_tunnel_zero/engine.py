@@ -12,14 +12,16 @@ import sqlite3
 import threading
 import time
 
-from . import RadioError, config as configuration
+from . import RadioError, config as configuration, mesh_tx
 from .decode import decode_packet
 from .gnss import GPS
-from .profiles import scan_plan
+from .profiles import meshcore as meshcore_profile, meshtastic as meshtastic_profile, scan_plan
 from .store import MIN_FREE_BYTES, Store, atomic_json, create_session, node_id, read_metadata
 
 RECENT = 120
 HISTORY_SECONDS = 120
+MIN_SEND_INTERVAL = 3.0
+NODEINFO_INTERVAL = 3 * 3600
 
 
 def open_radio(cfg, profile):
@@ -72,6 +74,12 @@ class Engine:
         self._gps_thread = None
         self._mt_keys, self._mc_keys = configuration.decode_keys(cfg)
         self._locked = False
+        self._tx = queue.Queue(maxsize=8)
+        self._airtime = deque()          # (monotonic, seconds) for the duty-cycle budget
+        self._last_send = 0.0
+        self._nodeinfo_at = 0.0
+        self._outgoing = {}              # dedupe key -> outgoing message dict
+        self._heard = {}                 # dedupe key -> incoming message dict
 
     # -- lifecycle -------------------------------------------------------
     def start_gps(self):
@@ -90,11 +98,14 @@ class Engine:
         self.active = self.plan[0]
         self.recent.clear()
         self.messages.clear()
+        self._outgoing.clear()
+        self._heard.clear()
+        self._nodeinfo_at = 0.0
         self.nodes.clear()
         self.history.clear()
         self.per_profile = {p.id: 0 for p in self.plan}
         self.counters = dict(received=0, saved=0, decoded=0, encrypted=0, malformed=0,
-                             crc_errors=0, queue_drops=0, write_errors=0)
+                             crc_errors=0, queue_drops=0, write_errors=0, sent=0, send_failures=0)
         self._stop.clear()
         self.state = "starting"
         self.directory = create_session(configuration.data_dir(self.cfg) if data_root is None else data_root)
@@ -105,6 +116,8 @@ class Engine:
         try:
             self.radio = self.radio_factory(self.cfg, self.active)
             self.radio.open()
+            if hasattr(self.radio, "allow_tx"):
+                self.radio.allow_tx = bool(self.cfg.get("tx_enabled"))
             self.store = Store(self.directory)
         except Exception as exc:
             self._fail_start(meta, exc)
@@ -176,6 +189,7 @@ class Engine:
     def _receive(self):
         try:
             while not self._stop.is_set():
+                self._service_tx()
                 record = self.radio.receive(timeout=0.25)
                 if record:
                     record["receiver_gps"] = self.gps.snapshot()
@@ -200,6 +214,128 @@ class Engine:
         self.radio.tune(profile)
         self.active = profile
         self.dwell_deadline = time.monotonic() + profile.dwell_seconds
+
+    # -- transmit ----------------------------------------------------------
+    def can_transmit(self):
+        """None when sending is possible, else a reason to show the user."""
+        if not self.cfg.get("tx_enabled"):
+            return "Transmit is off. Turn it on in Settings > Messaging."
+        if self.state != "capturing" or self.radio is None:
+            return "Start the radio first (Space)"
+        if not hasattr(self.radio, "transmit"):
+            return "This receiver can't transmit; use the Cap LoRa-1262"
+        return None
+
+    def tx_profile(self, protocol):
+        if self.active is not None and self.active.protocol == protocol:
+            return self.active
+        for profile in self.plan:
+            if profile.protocol == protocol:
+                return profile
+        region = self.cfg.get("region")
+        if protocol == "meshtastic":
+            profile = meshtastic_profile(region, self.cfg.get("preset", "LONG_FAST"), self.cfg.get("slot", 0))
+        else:
+            profile = meshcore_profile(region, self.cfg.get("meshcore_profile", "AUTO"))
+        if profile is None or not profile.selectable():
+            raise mesh_tx.SendError("No %s profile in this region fits the cap's band" % protocol)
+        return profile
+
+    def airtime_used(self, window=3600.0):
+        now = time.monotonic()
+        while self._airtime and now - self._airtime[0][0] > window:
+            self._airtime.popleft()
+        return sum(seconds for _, seconds in self._airtime)
+
+    def node_number(self):
+        return self.cfg.get("node_number") or 0
+
+    def identity(self):
+        number = self.node_number()
+        suffix = "%04x" % (number & 0xFFFF)
+        name = self.cfg.get("node_name") or "LORA Tunnel " + suffix
+        short = self.cfg.get("node_short") or suffix[-4:]
+        return number, name, short
+
+    def send(self, protocol, channel, text):
+        """Queue one channel message; returns the message entry shown in the feed."""
+        reason = self.can_transmit()
+        if reason:
+            raise mesh_tx.SendError(reason)
+        if time.monotonic() - self._last_send < MIN_SEND_INTERVAL:
+            raise mesh_tx.SendError("Wait a few seconds between messages")
+        channels = dict(mesh_tx.send_channels(self.cfg, protocol))
+        if channel not in channels:
+            raise mesh_tx.SendError("No key for channel %s" % channel)
+        key = channels[channel]
+        profile = self.tx_profile(protocol)
+        number, name, short = self.identity()
+        hop_limit = self.cfg.get("hop_limit", 3)
+        frames = []
+        if protocol == "meshtastic":
+            if not number:
+                raise mesh_tx.SendError("Set up your node identity in Settings first")
+            if time.time() - self._nodeinfo_at > NODEINFO_INTERVAL:
+                frames.append(("nodeinfo", mesh_tx.meshtastic_nodeinfo(
+                    number, mesh_tx.new_packet_id(), name, short, channel, key, hop_limit)))
+            packet_id = mesh_tx.new_packet_id()
+            frames.append(("text", mesh_tx.meshtastic_text(number, packet_id, text, channel, key, hop_limit)))
+            dedupe = ("meshtastic", "!%08x" % number, "%08x" % packet_id)
+        else:
+            frame, plain = mesh_tx.meshcore_group_text(key, name, text, with_plain=True)
+            frames.append(("text", frame))
+            dedupe = ("meshcore", plain.hex())
+        needed = sum(mesh_tx.airtime(profile, len(f)) for _, f in frames)
+        _, duty = mesh_tx.region_limits(self.cfg.get("region"))
+        budget = 3600.0 * duty / 100.0
+        if self.airtime_used() + needed > budget:
+            raise mesh_tx.SendError("Hourly airtime limit for this region reached (%d%% duty cycle)" % duty)
+        message = {"time": time.time(), "protocol": protocol, "channel": channel, "from": name, "text": text,
+                   "rssi": None, "outgoing": True, "status": "queued", "heard": 0, "profile": profile.label,
+                   "airtime": needed}
+        try:
+            self._tx.put_nowait((frames, profile, message, dedupe))
+        except queue.Full:
+            raise mesh_tx.SendError("Still sending earlier messages") from None
+        self._last_send = time.monotonic()
+        with self.lock:
+            self._outgoing[dedupe] = message
+            self.messages.appendleft(message)
+        return message
+
+    def _service_tx(self):
+        while True:
+            try:
+                frames, profile, message, dedupe = self._tx.get_nowait()
+            except queue.Empty:
+                return
+            power = min(self.cfg.get("tx_power_dbm", 17), mesh_tx.region_limits(self.cfg.get("region"))[0])
+            try:
+                for kind, frame in frames:
+                    seconds = self.radio.transmit(frame, profile, power)
+                    self._airtime.append((time.monotonic(), mesh_tx.airtime(profile, len(frame))))
+                    if kind == "nodeinfo":
+                        self._nodeinfo_at = time.time()
+                    self._log_tx(frame, profile, power, kind)
+                message["status"] = "sent"
+                self.counters["sent"] += 1
+            except (RadioError, OSError) as exc:
+                message["status"] = "failed"
+                message["error"] = str(exc) if isinstance(exc, RadioError) else type(exc).__name__
+                self.counters["send_failures"] += 1
+            finally:
+                if self.active is not None and getattr(self.radio, "profile", self.active) != self.active:
+                    self.radio.tune(self.active)
+
+    def _log_tx(self, frame, profile, power, kind):
+        """Outgoing frames go into the session log too, marked as transmitted."""
+        record = {"timestamp": time.time(), "profile": profile.to_dict(), "raw_hex": frame.hex(),
+                  "rssi_dbm": None, "snr_db": None, "crc_ok": True, "direction": "tx",
+                  "tx_power_dbm": power, "tx_kind": kind, "receiver_gps": self.gps.snapshot()}
+        try:
+            self._queue.put_nowait(record)
+        except queue.Full:
+            self.counters["queue_drops"] += 1
 
     def _write(self):
         last_flush = time.monotonic()
@@ -238,6 +374,8 @@ class Engine:
             except Exception:
                 record["decoded"] = {"protocol": "unknown", "decode_status": "decoder_error"}
         self.store.append(record)
+        if record.get("direction") == "tx":
+            return
         self.counters["saved"] += 1
         status = record["decoded"].get("decode_status")
         if status == "decoded":
@@ -262,7 +400,8 @@ class Engine:
                 self.history.popleft()
             node = node_id(decoded)
             entry = None
-            if node:
+            mine = protocol == "meshtastic" and self.node_number() and node == "!%08x" % self.node_number()
+            if node and not mine:
                 key = (protocol, node)
                 entry = self.nodes.get(key)
                 if entry is None:
@@ -292,6 +431,8 @@ class Engine:
             if entry is not None:
                 label = entry.get("short_name") or entry.get("name")
             sender = label or short_id(protocol, node)
+            if mine:
+                sender = self.identity()[1]
             text = decoded.get("text")
             # MeshCore group text carries "Sender: message" inside the encrypted body.
             if text and protocol == "meshcore" and node is None and ": " in text[:40]:
@@ -299,16 +440,41 @@ class Engine:
                 sender = claimed.strip()[:32] or sender
             if text:
                 channel = decoded.get("channel_name", "?")
-                self.messages.appendleft({"time": record["timestamp"], "protocol": protocol,
-                                          "channel": channel, "from": sender, "text": text,
-                                          "rssi": rssi})
-                if entry is not None:
-                    entry["texts"].appendleft(text)
+                dedupe = self._message_key(decoded)
+                mine = self._outgoing.get(dedupe) if dedupe else None
+                heard = self._heard.get(dedupe) if dedupe else None
+                if mine is not None:
+                    # Another node repeated our message: proof it left the device.
+                    mine["status"] = "relayed"
+                    mine["heard"] += 1
+                    mine["rssi"] = rssi if mine["rssi"] is None else max(mine["rssi"], rssi or -999)
+                elif heard is not None:
+                    heard["heard"] += 1
+                    if isinstance(rssi, (int, float)) and (heard["rssi"] is None or rssi > heard["rssi"]):
+                        heard["rssi"] = rssi
+                else:
+                    item = {"time": record["timestamp"], "protocol": protocol, "channel": channel,
+                            "from": sender, "text": text, "rssi": rssi, "outgoing": False, "heard": 1}
+                    self.messages.appendleft(item)
+                    if dedupe:
+                        self._heard[dedupe] = item
+                        if len(self._heard) > 400:
+                            self._heard.pop(next(iter(self._heard)))
+                    if entry is not None:
+                        entry["texts"].appendleft(text)
             self.recent.appendleft({"time": record["timestamp"], "protocol": protocol, "from": sender,
                                     "kind": decoded.get("port_name") or decoded.get("payload_name") or "raw",
                                     "status": decoded.get("decode_status", "raw"), "rssi": rssi,
                                     "snr": record.get("snr_db"), "profile": record["profile"].get("label"),
                                     "text": text, "record": record})
+
+    @staticmethod
+    def _message_key(decoded):
+        if decoded.get("protocol") == "meshtastic" and decoded.get("packet_id"):
+            return ("meshtastic", decoded.get("source_id"), decoded["packet_id"])
+        if decoded.get("protocol") == "meshcore" and decoded.get("payload_hex"):
+            return ("meshcore", decoded["payload_hex"])
+        return None
 
     # -- read side ---------------------------------------------------------
     def dwell_remaining(self):

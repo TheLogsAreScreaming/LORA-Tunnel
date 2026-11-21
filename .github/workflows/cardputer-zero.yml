@@ -2,9 +2,9 @@ name: CardputerZero app
 
 on:
   push:
-    paths: ['cardputer-zero/**', '.github/workflows/cardputer-zero.yml']
+    paths: ['cardputer-zero/**', 'lib/recon/**', 'lib/opendroneid/**', '.github/workflows/cardputer-zero.yml']
   pull_request:
-    paths: ['cardputer-zero/**', '.github/workflows/cardputer-zero.yml']
+    paths: ['cardputer-zero/**', 'lib/recon/**', 'lib/opendroneid/**', '.github/workflows/cardputer-zero.yml']
   workflow_dispatch:
 
 permissions:
@@ -25,6 +25,10 @@ jobs:
         run: python -m pip install pillow numpy cryptography pyserial pytest
       - name: Unit, engine and UI tests
         run: python -m pytest -q tests
+      - name: Recon vendor table matches the firmware source
+        run: python tools/sync_recon_data.py --check
+      - name: Recon classifier matches the firmware C++ (fixtures and seeded mutations)
+        run: python tools/check_recon_parity.py --cases 60000
       - name: Render store screenshots (synthetic traffic)
         run: python tools/render_screens.py --out build/screenshots
       - name: Build the APPLaunch .deb

@@ -3,33 +3,48 @@
   "version": "1.0.0",
   "app_name": "LORA Tunnel",
   "bin_name": "lora-tunnel",
-  "description": "LoRa mesh wardriving, Meshtastic and MeshCore decoding, LoRaTAP PCAP logging (Cap LoRa-1262)",
+  "description": "LoRa mesh wardriver with Meshtastic and MeshCore decode and messaging, plus Wi-Fi/BLE Recon (Cap LoRa-1262)",
   "store": {
-    "summary": "LoRa mesh wardriver: Meshtastic + MeshCore decode, GPS, PCAP/Kismet-style logs",
-    "description": "LORA Tunnel turns the CardputerZero and Cap LoRa-1262 into a standalone LoRa mesh wardriver. Pick your region and it listens for Meshtastic, MeshCore, both in turn, or surveys every preset to find what your community uses. It decrypts the default channels and any private channel keys you add: node names, roles, positions, telemetry and channel messages. Every frame is saved with its raw bytes and exact radio settings, with your GPS position kept separate from what nodes claim. Logs are JSONL, SQLite and LoRaTAP PCAP (open in Wireshark), with CSV and Google Earth KML export. Same channel plan as Kismet's LoRaPipe; a LoRaPipe USB radio also works. Receive only in this version.",
-    "categories": ["Radio & Comms", "Security"],
+    "summary": "LoRa mesh wardriver: Meshtastic + MeshCore decode and chat, Wi-Fi/BLE Recon",
+    "description": "LORA Tunnel turns the CardputerZero and Cap LoRa-1262 into a standalone LoRa mesh wardriver. Pick your region and it listens for Meshtastic, MeshCore, both in turn, or surveys every preset to find what your community uses. It decrypts the default channels and any private channel keys you add: node names, roles, positions, telemetry and channel messages. Every frame is saved with its raw bytes and exact radio settings, with your GPS position kept separate from what nodes claim. Logs are JSONL, SQLite and LoRaTAP PCAP (open in Wireshark), with CSV and Google Earth KML export, on the same channel plan as Kismet's LoRaPipe. Messages lets you chat on Meshtastic and MeshCore channels and shows when your message was relayed. Transmit is off until you turn it on, and it keeps to your region's power and duty-cycle limits. Recon scans nearby Wi-Fi and Bluetooth LE for ALPR cameras, Flock devices, body cameras, trackers like AirTag and SmartTag, Remote ID drones and more, rates each match by confidence, warns you, flags anything that seems to follow you, and has a signal finder to locate it.",
+    "categories": [
+      "Radio & Comms",
+      "Security"
+    ],
     "screenshots": [
       "screenshots/wardrive-live.png",
-      "screenshots/nodes.png",
+      "screenshots/recon-live.png",
       "screenshots/messages.png",
-      "screenshots/packet-detail.png",
-      "screenshots/home.png",
-      "screenshots/settings.png"
+      "screenshots/nodes.png",
+      "screenshots/recon-detail.png",
+      "screenshots/home.png"
     ],
     "icon": "packaging/icon.png",
     "license": "MIT",
     "source_repo": "https://github.com/valleytechsolutions/LORA-Tunnel",
-    "author": { "github": "valleytechsolutions", "display_name": "Valleytech Solutions" },
+    "author": {
+      "github": "valleytechsolutions",
+      "display_name": "Valleytech Solutions"
+    },
     "share_code": "LORA",
     "permissions": {
       "camera": false,
       "microphone": false,
       "imu": false,
-      "network": false,
+      "network": true,
       "additional_hardware": true,
       "background_service": false,
       "external_display": false
     },
-    "locales": {}
+    "locales": {
+      "zh-CN": {
+        "title": "LORA Tunnel",
+        "summary": "LoRa Mesh 扫描器：Meshtastic 与 MeshCore 解码和聊天，Wi-Fi/BLE 侦察"
+      },
+      "ja": {
+        "title": "LORA Tunnel",
+        "summary": "LoRaメッシュ探索：Meshtastic・MeshCoreの解読とチャット、Wi-Fi/BLE偵察"
+      }
+    }
   }
 }

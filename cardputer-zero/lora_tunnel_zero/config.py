@@ -12,7 +12,7 @@ from pathlib import Path
 import stat
 import tempfile
 
-from . import profiles
+from . import profiles, recon
 
 MAX_BYTES = 32768
 MAX_KEYS = 8
@@ -32,6 +32,20 @@ DEFAULTS = {
     "meshcore_keys": [],
     "meshcore_hashtags": [],
     "data_dir": "",
+    # Messaging (transmit is off until the user turns it on)
+    "tx_enabled": False,
+    "tx_power_dbm": 17,
+    "hop_limit": 3,
+    "node_number": 0,
+    "node_name": "",
+    "node_short": "",
+    # Recon
+    "recon_wifi": True,
+    "recon_ble": True,
+    "recon_sound": True,
+    "recon_display_min": "low",
+    "recon_alert_min": "medium",
+    "recon_categories": list(recon.CATEGORIES),
 }
 
 _CHOICES = {
@@ -39,6 +53,8 @@ _CHOICES = {
     "mode": set(profiles.MODES),
     "preset": set(profiles.PRESETS),
     "backend": {"cap", "lorapipe", "demo"},
+    "recon_display_min": {"low", "medium", "high"},
+    "recon_alert_min": {"low", "medium", "high"},
 }
 
 
@@ -94,6 +110,29 @@ def validate(key, value):
     if key in ("slot",):
         if type(value) is not int or not 0 <= value <= 104:
             raise ConfigError("Slot must be 0 (default) to 104")
+        return value
+    if key == "tx_power_dbm":
+        if type(value) is not int or not 2 <= value <= 22:
+            raise ConfigError("Transmit power must be 2 to 22 dBm")
+        return value
+    if key == "hop_limit":
+        if type(value) is not int or not 1 <= value <= 7:
+            raise ConfigError("Hop limit must be 1 to 7")
+        return value
+    if key == "node_number":
+        if type(value) is not int or not (value == 0 or 4 <= value < 0xFFFFFFFF):
+            raise ConfigError("Node number is out of range")
+        return value
+    if key in ("node_name", "node_short"):
+        limit = 4 if key == "node_short" else 32
+        if not isinstance(value, str) or len(value) > limit or len(value.encode("utf-8")) > limit * 2:
+            raise ConfigError("Name is too long" if key == "node_name" else "Short name is 1 to 4 characters")
+        if any(ord(c) < 32 or ord(c) == 127 or c == ":" for c in value):
+            raise ConfigError("Names can't contain control characters or ':'")
+        return value.strip()
+    if key == "recon_categories":
+        if not isinstance(value, list) or any(v not in recon.CATEGORIES for v in value) or len(set(value)) != len(value):
+            raise ConfigError("Unknown Recon category")
         return value
     if key in ("dwell_seconds", "survey_dwell_seconds"):
         if type(value) not in (int, float) or not profiles.MIN_DWELL <= value <= profiles.MAX_DWELL:

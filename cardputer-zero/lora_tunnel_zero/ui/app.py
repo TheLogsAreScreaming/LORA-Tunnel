@@ -5,18 +5,27 @@ import time
 
 from PIL import Image
 
-from .. import RadioError, config as configuration, profiles
+from .. import RadioError, config as configuration, mesh_tx, profiles
 from ..export import export_session
+from ..recon_scan import Recon
 from ..store import list_sessions
-from . import icons, screens
+from . import icons, recon_screens, screens
 from .gfx import (AMBER, BG, FAINT, FOOTER_H, GREEN, H, LINE, MUTED, RED, STATUS_H, SURFACE, TEXT, W,
                   Canvas, clock, font, image)
 
 
+def make_recon(cfg, gps):
+    if cfg.get("backend") == "demo":
+        from ..demo import DemoBle, DemoWifi
+        return Recon(cfg, gps, wifi=DemoWifi(), ble=DemoBle())
+    return Recon(cfg, gps)
+
+
 class App:
-    def __init__(self, display, keyboard, engine, cfg, config_path=None, data_root=None, splash=True):
+    def __init__(self, display, keyboard, engine, cfg, config_path=None, data_root=None, splash=True, recon=None):
         self.display, self.keyboard, self.engine = display, keyboard, engine
         self.cfg = dict(cfg)
+        self.recon = recon or make_recon(self.cfg, engine.gps)
         self.config_path = config_path
         self._data_root = data_root
         self.stack = [screens.Home()]
@@ -44,7 +53,8 @@ class App:
 
     def open(self, name):
         factory = {"Wardrive": screens.Wardrive, "Nodes": screens.Nodes, "Messages": screens.Messages,
-                   "Packets": screens.Packets, "Sessions": screens.Sessions, "Settings": screens.Settings}
+                   "Packets": screens.Packets, "Sessions": screens.Sessions, "Settings": screens.Settings,
+                   "Recon": recon_screens.Recon, "Help": screens.Help}
         # Jumping between top-level screens replaces rather than deepens the stack.
         while len(self.stack) > 1 and not isinstance(self.stack[-1], screens.Modal):
             self.stack.pop()
@@ -82,10 +92,95 @@ class App:
             return False
         self.engine.cfg = dict(self.cfg)
         self.engine._mt_keys, self.engine._mc_keys = configuration.decode_keys(self.cfg)
+        self.recon.cfg = dict(self.cfg)
+        radio = self.engine.radio
+        if radio is not None and hasattr(radio, "allow_tx"):
+            radio.allow_tx = bool(self.cfg.get("tx_enabled"))
         return True
 
     # -- actions ---------------------------------------------------------
-    def toggle_capture(self):
+    def toggle_recon(self):
+        r = self.recon
+        if r.state == "running":
+            r.stop()
+            self.session_cache(refresh=True)
+            self.toast("Recon saved  ·  %d devices, %d flagged" % (len(r.devices), sum(
+                1 for d in r.devices.values() if d.get("category"))))
+            return
+        try:
+            r.cfg = dict(self.cfg)
+            r.start(self.sessions_root())
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.toast(str(exc) or type(exc).__name__, RED, 4)
+            return
+        if not isinstance(self.screen, recon_screens.Recon):
+            self.open("Recon")
+        self.toast("Recon started", GREEN)
+
+    # -- messaging -------------------------------------------------------
+    def send_targets(self):
+        mode = self.cfg.get("mode", "meshtastic")
+        protocols = ["meshtastic"] if mode == "meshtastic" else ["meshcore"] if mode == "meshcore" \
+            else ["meshtastic", "meshcore"]
+        targets = []
+        for protocol in protocols:
+            targets += [(protocol, name) for name, _ in mesh_tx.send_channels(self.cfg, protocol)]
+        return targets
+
+    def write_message(self, target=None):
+        if not self.cfg.get("tx_enabled"):
+            self.offer_transmit(lambda: self.write_message(target))
+            return
+        targets = self.send_targets()
+        if not targets:
+            self.toast("Add a channel key or turn on default channels first", AMBER, 4)
+            return
+        self.push(screens.Compose(targets, target))
+
+    def offer_transmit(self, then=None):
+        region = self.cfg.get("region")
+        if not region:
+            self.pick_region()
+            return
+        cap, duty = mesh_tx.region_limits(region)
+        power = min(self.cfg.get("tx_power_dbm", 17), cap)
+        detail = ("LORA Tunnel will transmit your messages at %d dBm in %s%s. You're responsible for "
+                  "following local radio rules." % (power, profiles.REGIONS[region].label,
+                                                     ", %d%% duty cycle" % duty if duty < 100 else ""))
+
+        def enable():
+            changes = {"tx_enabled": True}
+            if not self.cfg.get("node_number"):
+                changes["node_number"] = mesh_tx.new_node_number()
+            if self.save_config(**changes):
+                self.toast("Transmit on")
+                if not self.cfg.get("node_name"):
+                    default = self.engine.identity()[1]
+
+                    def named(value):
+                        self.save_config(node_name=value[:32])
+                        if then:
+                            then()
+                    self.push(screens.TextInput("Your name on the mesh", named, initial=default))
+                elif then:
+                    then()
+        self.confirm("Turn on transmit?", detail, "Turn on", enable)
+
+    def send_message(self, protocol, channel, text):
+        e = self.engine
+        if e.state != "capturing":
+            self.toggle_capture(show=False)
+            if e.state != "capturing":
+                return False
+        try:
+            e.send(protocol, channel, text)
+        except mesh_tx.SendError as exc:
+            self.toast(str(exc), AMBER, 4)
+            return False
+        self.toast("Sending on %s" % channel)
+        return True
+
+    def toggle_capture(self, show=True):
         e = self.engine
         if e.state == "capturing":
             e.stop()
@@ -104,7 +199,7 @@ class App:
             e.error = str(exc) or type(exc).__name__
             self.toast(e.error, RED, 4)
             return
-        if not isinstance(self.screen, screens.Wardrive):
+        if show and not isinstance(self.screen, screens.Wardrive):
             self.open("Wardrive")
         self.toast("Capture started", GREEN)
 
@@ -160,6 +255,32 @@ class App:
                        ("demo", "Demo", "synthetic")]
         elif name == "decode_public":
             return self.save_config(decode_public=not cfg.get("decode_public", True))
+        elif name == "tx_enabled":
+            if cfg.get("tx_enabled"):
+                self.save_config(tx_enabled=False)
+                return self.toast("Transmit off  ·  receive only")
+            return self.offer_transmit()
+        elif name in ("recon_wifi", "recon_ble", "recon_sound"):
+            if self.recon.state == "running" and name != "recon_sound":
+                return self.toast("Stop Recon to change scanners", AMBER)
+            return self.save_config(**{name: not cfg.get(name, True)})
+        elif name in ("node_name", "node_short"):
+            if not cfg.get("node_number"):
+                self.save_config(node_number=mesh_tx.new_node_number())
+            number, current_name, current_short = self.engine.identity()
+            title = "Your name on the mesh" if name == "node_name" else "Short name (up to 4)"
+            return self.push(screens.TextInput(title, lambda v: self.save_config(**{name: v.strip()}),
+                                               initial=current_name if name == "node_name" else current_short))
+        elif name == "tx_power_dbm":
+            cap = mesh_tx.region_limits(cfg.get("region"))[0]
+            options = [(v, "%d dBm" % v, "%.0f mW%s" % (10 ** (v / 10), "" if v <= cap else " · capped"))
+                       for v in (2, 5, 10, 14, 17, 20, 22)]
+        elif name == "hop_limit":
+            options = [(v, "%d hops" % v, "default" if v == 3 else "") for v in range(1, 8)]
+        elif name in ("recon_display_min", "recon_alert_min"):
+            options = [("low", "Weak indicators", "names, shared vendors"),
+                       ("medium", "Medium evidence", "specific vendor/service"),
+                       ("high", "Strong signatures", "only")]
         elif name == "serial_device":
             return self.push(screens.TextInput("Serial device", lambda v: self.save_config(serial_device=v),
                                                initial=cfg.get("serial_device") or "/dev/ttyACM0"))
@@ -213,6 +334,8 @@ class App:
         if chrome:
             self.status_bar(c, under)
         under.render(c, self)
+        if not isinstance(under, recon_screens.Recon) and not modal:
+            recon_screens.alert_banner(c, self)
         if modal:
             shade = Image.new("RGBA", (W, H), (0, 0, 0, 170))
             c.image.paste(shade, (0, 0), shade)
@@ -233,8 +356,6 @@ class App:
         mark = image("radio-mark.png", (9, 15))
         c.paste(mark, (5, 2))
         x = 18 + c.text((18, 2), "LORA TUNNEL", font("display", 12), GREEN)
-        if screen.title:
-            c.text((x + 6, 5), screen.title, font("bold", 8), MUTED)
         right = W - 5
         c.text_right(right, 4, time.strftime("%H:%M"), font("monob", 9), TEXT)
         right -= 36
@@ -245,6 +366,19 @@ class App:
         right -= max(10, int(c.text_width(label, font("monob", 9)))) + 2
         icons.pin(c.draw, right - 10, 3, 11, color)
         right -= 18
+        if self.recon.state == "running":
+            summary = self.recon.summary()
+            eye = RED if summary["strong"] or summary["following"] else AMBER if summary["flagged"] else GREEN
+            if summary["flagged"]:
+                c.text_right(right, 4, str(summary["flagged"]), font("monob", 9), eye)
+                right -= int(c.text_width(str(summary["flagged"]), font("monob", 9))) + 2
+            icons.eye(c.draw, right - 13, 3, 12, eye)
+            right -= 18
+        if self.cfg.get("tx_enabled"):
+            f = font("monob", 7)
+            c.rect((right - 17, 4, right - 1, 14), fill=(60, 44, 8), radius=3)
+            c.text_center(right - 9, 5, "TX", f, AMBER)
+            right -= 21
         if self.engine.state == "capturing":
             f = font("monob", 8)
             text = clock(self.engine.elapsed())
@@ -296,10 +430,13 @@ class App:
                     self.display.show(self.compose())
                     last_draw, self.dirty = now, False
         finally:
+            self.recon.stop()
             self.engine.shutdown()
 
 
 def name_title(name):
     return {"mode": "Scan mode", "preset": "Meshtastic preset", "slot": "Frequency slot",
             "meshcore_profile": "MeshCore profile", "dwell_seconds": "Dwell per profile",
-            "survey_dwell_seconds": "Survey dwell", "backend": "Receiver"}.get(name, name)
+            "survey_dwell_seconds": "Survey dwell", "backend": "Receiver", "tx_power_dbm": "Transmit power",
+            "hop_limit": "Hop limit", "recon_display_min": "Show devices from",
+            "recon_alert_min": "Alert from"}.get(name, name)

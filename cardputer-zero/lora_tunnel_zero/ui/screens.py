@@ -7,7 +7,7 @@ from datetime import datetime
 import shutil
 import time
 
-from .. import __version__, config as configuration, profiles
+from .. import __version__, config as configuration, mesh_tx, profiles, recon
 from ..store import list_sessions
 from . import icons
 from .gfx import (AMBER, BG, CONTENT_BOTTOM, CONTENT_TOP, CYAN, FAINT, GREEN, GREEN_DIM, GREEN_INK,
@@ -32,6 +32,10 @@ class Screen:
             app.pop()
             return True
         return False
+
+
+class Modal(Screen):
+    modal = True
 
 
 class ListMixin:
@@ -117,18 +121,21 @@ class Home(Screen):
     title = "HOME"
     TILES = [
         ("W", "Wardrive", "radio"),
-        ("N", "Nodes", "nodes"),
+        ("R", "Recon", "eye"),
         ("M", "Messages", "chat"),
+        ("N", "Nodes", "nodes"),
         ("P", "Packets", "scan"),
         ("S", "Sessions", "folder"),
         ("C", "Settings", "sliders"),
+        ("H", "Help", "keyboard"),
     ]
+    COLUMNS = 4
 
     def __init__(self):
         self.index = 0
 
     def hints(self, app):
-        return [("Enter", "Open"), ("Space", "Start/Stop"), ("W N M P S C", "Jump")]
+        return [("Enter", "Open"), ("Space", "Radio on/off"), ("Letter", "Jump"), ("H", "Help")]
 
     def subtitle(self, label, app):
         e = app.engine
@@ -137,10 +144,20 @@ class Home(Screen):
                 return "REC %s" % clock(e.elapsed())
             region = app.cfg.get("region")
             return ("Ready · " + region) if region else "Pick a region"
+        if label == "Recon":
+            r = app.recon
+            if r.state == "running":
+                summary = r.summary()
+                return "%d flagged" % summary["flagged"] if summary["flagged"] else "Watching"
+            return "Wi-Fi + BLE"
         if label == "Nodes":
             return "%d heard" % len(e.nodes)
         if label == "Messages":
+            if not app.cfg.get("tx_enabled"):
+                return "%d heard · RX" % len(e.messages)
             return "%d heard" % len(e.messages)
+        if label == "Help":
+            return "Keys & tips"
         if label == "Packets":
             return "%d saved" % e.counters.get("saved", 0) if e.counters else "None yet"
         if label == "Sessions":
@@ -150,26 +167,34 @@ class Home(Screen):
         return ""
 
     def render(self, c, app):
-        tw, th, gap, x0, y0 = 101, 63, 4, 4, TOP
+        gap, x0, y0 = 4, 4, TOP
+        tw = (W - 2 * x0 - gap * (self.COLUMNS - 1)) // self.COLUMNS
+        th = 63
         for i, (key, label, icon) in enumerate(self.TILES):
-            col, row = i % 3, i // 3
+            col, row = i % self.COLUMNS, i // self.COLUMNS
             x, y = x0 + col * (tw + gap), y0 + row * (th + gap)
             selected = i == self.index
-            live = label == "Wardrive" and app.engine.state == "capturing"
+            live = (label == "Wardrive" and app.engine.state == "capturing") or \
+                (label == "Recon" and app.recon.state == "running")
+            flagged = label == "Recon" and live and app.recon.summary()["flagged"]
             c.rect((x, y, x + tw, y + th), fill=SURFACE_2 if selected else SURFACE,
                    outline=GREEN if selected else LINE, radius=6, width=1)
-            color = RED if live else (GREEN if selected else TEXT)
-            icons.ICONS["record" if live else icon](c.draw, x + 8, y + 8, 20, color)
-            c.text((x + tw - 8, y + 7), key, font("monob", 9), FAINT if not selected else GREEN, anchor="ra")
-            c.text((x + 8, y + 33), label, font("bold", 12), TEXT)
-            c.text((x + 8, y + 49), self.subtitle(label, app), font("mono", 9),
-                   RED if live else MUTED, width=tw - 14)
+            color = (AMBER if flagged else RED) if live else (GREEN if selected else TEXT)
+            if live and label == "Wardrive":
+                icons.record(c.draw, x + 7, y + 7, 18, color)
+            else:
+                icons.ICONS[icon](c.draw, x + 7, y + 7, 18, color)
+            c.text((x + tw - 7, y + 6), key, font("monob", 9), FAINT if not selected else GREEN, anchor="ra")
+            c.text((x + 7, y + 32), label, font("bold", 11), TEXT, width=tw - 10)
+            c.text((x + 7, y + 48), self.subtitle(label, app), font("mono", 8),
+                   (AMBER if flagged else RED) if live else MUTED, width=tw - 10)
 
     def handle(self, key, app):
+        count = len(self.TILES)
         if key.name in ("LEFT", "RIGHT"):
-            self.index = (self.index + (1 if key == "RIGHT" else -1)) % 6
+            self.index = (self.index + (1 if key == "RIGHT" else -1)) % count
         elif key.name in ("UP", "DOWN"):
-            self.index = (self.index + 3) % 6
+            self.index = (self.index + self.COLUMNS) % count
         elif key == "ENTER":
             app.open(self.TILES[self.index][1])
         elif key == "SPACE":
@@ -177,8 +202,9 @@ class Home(Screen):
         elif key.name in [t[0] for t in self.TILES]:
             app.open(next(t[1] for t in self.TILES if t[0] == key.name))
         elif key in ("ESC", "BACKSPACE", "Q"):
-            app.confirm("Quit LORA Tunnel?", "Capture stops and the session is saved." if
-                        app.engine.state == "capturing" else "See you on the air.", "Quit", app.quit)
+            busy = app.engine.state == "capturing" or app.recon.state == "running"
+            app.confirm("Quit LORA Tunnel?", "Capture and Recon stop and their sessions are saved." if busy
+                        else "See you on the air.", "Quit", app.quit)
         else:
             return False
         return True
@@ -575,47 +601,182 @@ class NodeDetail(Details):
 
 
 # ---------------------------------------------------------------- messages
+STATUS_TEXT = {"queued": ("sending…", MUTED), "sent": ("sent", GREEN_DIM), "relayed": ("relayed", GREEN),
+               "failed": ("not sent", RED)}
+
+
 class Messages(Screen):
     title = "MESSAGES"
-    refresh = 1.0
+    refresh = 0.5
 
     def __init__(self):
         self.top = 0
+        self.tab = 0
+
+    def tabs(self, app):
+        seen = []
+        for item in app.engine.messages:
+            key = (item["protocol"], item["channel"])
+            if key not in seen:
+                seen.append(key)
+        for key in app.send_targets():
+            if key not in seen:
+                seen.append(key)
+        return [None] + seen
 
     def hints(self, app):
-        return [("↑↓", "Scroll"), ("Esc", "Back")]
+        return [("Enter", "Write"), ("←→", "Channel"), ("↑↓", "Scroll"), ("Esc", "Back")]
 
     def render(self, c, app):
-        items = list(app.engine.messages)
+        tabs = self.tabs(app)
+        self.tab = min(self.tab, len(tabs) - 1)
+        x = 6
+        for i, tab in enumerate(tabs):
+            label = "All" if tab is None else tab[1]
+            f = font("bold", 8)
+            w = int(c.text_width(label, f)) + 12
+            if x + w > W - 6:
+                break
+            selected = i == self.tab
+            color = MUTED if tab is None else PROTOCOL_COLOR.get(tab[0], MUTED)
+            c.rect((x, TOP - 2, x + w, TOP + 10), fill=color if selected else SURFACE, radius=6)
+            c.text_center(x + w / 2, TOP, label, f, BG if selected else color)
+            x += w + 4
+        current = tabs[self.tab]
+        items = [m for m in app.engine.messages if current is None or (m["protocol"], m["channel"]) == current]
+        top = TOP + 15
         if not items:
-            empty_state(c, "chat", "No channel messages heard",
-                        "Text on channels you hold keys for (default keys included) shows here as it's heard.")
+            if current is None:
+                detail = ("Channel text you hold keys for shows here. Press Enter to write one."
+                          if app.cfg.get("tx_enabled") else
+                          "Channel text you hold keys for shows here. Press Enter to turn on sending.")
+            else:
+                detail = "Nothing heard on %s yet. Press Enter to write." % current[1]
+            empty_state(c, "chat", "No messages yet", detail)
             return
         self.top = max(0, min(self.top, len(items) - 1))
-        y = TOP
+        y = top
         now = time.time()
         for item in items[self.top:]:
-            lines = c.wrap(item["text"], W - 30, font("ui", 10))[:3]
+            lines = c.wrap(item["text"], W - 60, font("ui", 10))[:3]
             height = 14 + len(lines) * 12
             if y + height > CONTENT_BOTTOM:
                 break
             color = PROTOCOL_COLOR.get(item["protocol"], MUTED)
-            c.rect((4, y, W - 8, y + height - 3), fill=SURFACE, radius=5)
-            c.rect((4, y + 3, 5, y + height - 6), fill=color)
-            c.text((12, y + 2), item["from"], font("bold", 9), color, width=120)
-            c.text_right(W - 14, y + 2, "%s · %s ago · %s dBm" % (item["channel"], ago(now - item["time"]),
-                                                                 fmt_rssi(item["rssi"])), font("mono", 8), FAINT)
-            for i, line in enumerate(lines):
-                c.text((12, y + 13 + i * 12), line, font("ui", 10), TEXT)
+            if item.get("outgoing"):
+                x0, x1 = 44, W - 8
+                c.rect((x0, y, x1, y + height - 3), fill=(16, 44, 22), radius=6)
+                c.rect((x1 - 2, y + 3, x1 - 1, y + height - 6), fill=color)
+                label, status_color = STATUS_TEXT.get(item.get("status"), ("", MUTED))
+                if item.get("status") == "relayed" and item.get("heard", 0) > 1:
+                    label = "relayed ×%d" % item["heard"]
+                c.text((x0 + 8, y + 2), "You · %s" % item["channel"], font("bold", 9), color, width=120)
+                c.text_right(x1 - 8, y + 2, "%s · %s" % (label, ago(now - item["time"])), font("mono", 8),
+                             status_color)
+                for i, line in enumerate(lines):
+                    c.text((x0 + 8, y + 13 + i * 12), line, font("ui", 10), TEXT)
+            else:
+                x1 = W - 40
+                c.rect((4, y, x1, y + height - 3), fill=SURFACE, radius=6)
+                c.rect((4, y + 3, 5, y + height - 6), fill=color)
+                c.text((12, y + 2), item["from"], font("bold", 9), color, width=110)
+                heard = " ×%d" % item["heard"] if item.get("heard", 1) > 1 else ""
+                c.text_right(x1 - 8, y + 2, "%s · %s · %s dBm%s" % (item["channel"], ago(now - item["time"]),
+                                                                   fmt_rssi(item["rssi"]), heard),
+                             font("mono", 8), FAINT)
+                for i, line in enumerate(lines):
+                    c.text((12, y + 13 + i * 12), line, font("ui", 10), TEXT)
             y += height
         if len(items) > 1:
             c.text_right(W - 10, CONTENT_BOTTOM - 10, "%d/%d" % (self.top + 1, len(items)), font("mono", 8), FAINT)
 
     def handle(self, key, app):
+        tabs = self.tabs(app)
         if key in ("UP", "DOWN"):
-            self.top = max(0, min(len(app.engine.messages) - 1, self.top + (1 if key == "DOWN" else -1)))
+            self.top = max(0, self.top + (1 if key == "DOWN" else -1))
+            return True
+        if key in ("LEFT", "RIGHT"):
+            self.tab = (self.tab + (1 if key == "RIGHT" else -1)) % len(tabs)
+            self.top = 0
+            return True
+        if key in ("ENTER", "C"):
+            current = tabs[min(self.tab, len(tabs) - 1)]
+            app.write_message(current)
             return True
         return super().handle(key, app)
+
+
+class Compose(Modal):
+    """Write a channel message. Tab picks the channel; Enter sends."""
+
+    text_mode = True
+    refresh = 0.5
+
+    def __init__(self, targets, target=None):
+        self.targets = targets
+        self.index = targets.index(target) if target in targets else 0
+        self.value = ""
+        self.blink = time.monotonic()
+
+    def hints(self, app):
+        return [("Enter", "Send"), ("Tab", "Channel"), ("Esc", "Cancel")]
+
+    def limit(self, app):
+        protocol = self.targets[self.index][0]
+        if protocol == "meshtastic":
+            return mesh_tx.MESHTASTIC_TEXT_MAX
+        return mesh_tx.MESHCORE_TEXT_MAX - len(app.engine.identity()[1].encode()) - 2
+
+    def render(self, c, app):
+        x0, y0, x1, y1 = 10, 24, W - 10, 140
+        c.rect((x0, y0, x1, y1), fill=SURFACE, outline=GREEN_DIM, radius=8)
+        protocol, channel = self.targets[self.index]
+        color = PROTOCOL_COLOR.get(protocol, MUTED)
+        c.badge(x0 + 10, y0 + 8, protocol)
+        c.text((x0 + 34, y0 + 6), channel, font("bold", 11), color, width=110)
+        try:
+            profile = app.engine.tx_profile(protocol)
+            power = min(app.cfg.get("tx_power_dbm", 17), mesh_tx.region_limits(app.cfg.get("region"))[0])
+            radio = "%s  %.3f MHz  %d dBm" % (profile.label, profile.frequency_mhz, power)
+        except Exception as exc:
+            radio = str(exc)
+        c.text_right(x1 - 10, y0 + 9, radio, font("mono", 8), MUTED)
+        box = (x0 + 8, y0 + 26, x1 - 8, y1 - 22)
+        c.rect(box, fill=BG, outline=LINE, radius=4)
+        f = font("ui", 11)
+        lines = c.wrap(self.value, box[2] - box[0] - 12, f) or [""]
+        lines = lines[-4:]
+        for i, line in enumerate(lines):
+            c.text((box[0] + 6, box[1] + 4 + i * 14), line, f, TEXT)
+        if int((time.monotonic() - self.blink) * 2) % 2 == 0:
+            w = c.text_width(lines[-1], f)
+            yy = box[1] + 4 + (len(lines) - 1) * 14
+            c.rect((box[0] + 7 + w, yy, box[0] + 8 + w, yy + 13), fill=GREEN)
+        used = len(self.value.encode("utf-8"))
+        limit = self.limit(app)
+        others = "  ·  Tab: %d channels" % len(self.targets) if len(self.targets) > 1 else ""
+        c.text((x0 + 10, y1 - 16), "From %s%s" % (app.engine.identity()[1], others), font("ui", 8), FAINT,
+               width=200)
+        c.text_right(x1 - 10, y1 - 16, "%d / %d bytes" % (used, limit), font("mono", 8), RED if used > limit else MUTED)
+
+    def handle(self, key, app):
+        if key == "ENTER":
+            if self.value.strip():
+                protocol, channel = self.targets[self.index]
+                if app.send_message(protocol, channel, self.value.strip()):
+                    app.pop()
+            return True
+        if key == "ESC":
+            app.pop()
+        elif key == "TAB":
+            self.index = (self.index + 1) % len(self.targets)
+        elif key.name in ("BACKSPACE", "DELETE"):
+            self.value = self.value[:-1]
+        elif key.char and key.char.isprintable() and len(self.value.encode("utf-8")) < self.limit(app):
+            self.value += key.char
+        else:
+            return False
+        return True
 
 
 # ---------------------------------------------------------------- sessions
@@ -708,16 +869,22 @@ class SessionDetail(Details):
 class Settings(Screen, ListMixin):
     title = "SETTINGS"
     VISIBLE = 9
+    RADIO_KEYS = {"region", "mode", "preset", "slot", "meshcore_profile", "dwell_seconds", "survey_dwell_seconds",
+                  "backend", "serial_device"}
 
     def __init__(self):
-        self.index = self.top = 0
+        self.index, self.top = 1, 0
 
     def items(self, app):
         cfg = app.cfg
         region = profiles.REGIONS.get(cfg.get("region"))
         mc = profiles.meshcore(cfg.get("region"), cfg.get("meshcore_profile", "AUTO")) if region else None
         preset = profiles.PRESETS[cfg.get("preset", "LONG_FAST")]
+        on = lambda key, default=True: "On" if cfg.get(key, default) else "Off"  # noqa: E731
+        number, name, short = app.engine.identity()
+        cap, _ = mesh_tx.region_limits(cfg.get("region"))
         items = [
+            (None, "RADIO", ""),
             ("region", "Region", region.label if region else "Not set"),
             ("mode", "Scan mode", profiles.MODE_LABELS[cfg.get("mode", "meshtastic")]),
             ("preset", "Meshtastic preset", preset.name),
@@ -732,47 +899,86 @@ class Settings(Screen, ListMixin):
         if cfg.get("backend") == "lorapipe":
             items.append(("serial_device", "Serial device", cfg.get("serial_device") or "Not set"))
         items += [
-            ("decode_public", "Default channel keys", "On" if cfg.get("decode_public", True) else "Off"),
+            (None, "CHANNELS", ""),
+            ("decode_public", "Default channel keys", on("decode_public")),
             ("meshtastic_keys", "Meshtastic keys", "%d added" % len(cfg.get("meshtastic_keys", []))),
             ("meshcore_keys", "MeshCore keys", "%d added" % (len(cfg.get("meshcore_keys", []))
                                                             + len(cfg.get("meshcore_hashtags", [])))),
+            (None, "MESSAGING", ""),
+            ("tx_enabled", "Transmit", "On" if cfg.get("tx_enabled") else "Off (receive only)"),
+            ("node_name", "Your name", name),
+            ("node_short", "Short name", short),
+            ("tx_power_dbm", "Transmit power", "%d dBm%s" % (min(cfg.get("tx_power_dbm", 17), cap),
+                                                             " (region cap)" if cfg.get("tx_power_dbm", 17) > cap else "")),
+            ("hop_limit", "Hop limit", str(cfg.get("hop_limit", 3))),
+            (None, "RECON", ""),
+            ("recon_wifi", "Scan Wi-Fi", on("recon_wifi")),
+            ("recon_ble", "Scan BLE", on("recon_ble")),
+            ("recon_categories", "Categories", "%d of %d" % (len(cfg.get("recon_categories", recon.CATEGORIES)),
+                                                            len(recon.CATEGORIES))),
+            ("recon_display_min", "Show from", cfg.get("recon_display_min", "low").title()),
+            ("recon_alert_min", "Alert from", cfg.get("recon_alert_min", "medium").title()),
+            ("recon_sound", "Alert sound", on("recon_sound")),
+            (None, "", ""),
             ("about", "About", "v" + __version__),
         ]
         return items
 
     def hints(self, app):
-        return [("Enter", "Change"), ("Esc", "Back")]
+        return [("Enter", "Change"), ("↑↓", "Move"), ("Esc", "Back")]
+
+    def _skip_headers(self, items, direction):
+        for _ in range(len(items)):
+            if items[self.index][0] is not None:
+                return
+            self.index = (self.index + direction) % len(items)
 
     def render(self, c, app):
         items = self.items(app)
+        self._skip_headers(items, 1)
         self.clamp(len(items), self.VISIBLE)
-        locked = app.engine.state == "capturing"
+        capturing = app.engine.state == "capturing"
         for row, (key, label, value) in enumerate(items[self.top:self.top + self.VISIBLE]):
             y = TOP + row * 15
+            if key is None:
+                if label:
+                    c.text((11, y + 3), label, font("bold", 7), GREEN_DIM)
+                    c.line((14 + c.text_width(label, font("bold", 7)), y + 7, W - 12, y + 7), fill=LINE)
+                continue
             selected = self.top + row == self.index
             if selected:
                 c.rect((4, y - 1, W - 8, y + 13), fill=SURFACE_2, radius=3)
                 c.rect((4, y + 1, 5, y + 11), fill=GREEN)
-            c.text((11, y), label, font("ui", 10), TEXT if not locked or key == "about" else FAINT)
-            c.text_right(W - 22, y + 1, value, font("mono", 9), GREEN if selected else MUTED)
+            locked = capturing and key in self.RADIO_KEYS
+            c.text((11, y), label, font("ui", 10), FAINT if locked else TEXT)
+            color = GREEN if selected else MUTED
+            if key == "tx_enabled" and app.cfg.get("tx_enabled"):
+                color = AMBER
+            c.text_right(W - 22, y + 1, value, font("mono", 9), color)
             c.text((W - 18, y - 1), "›", font("bold", 11), FAINT)
         self.scrollbar(c, len(items), self.VISIBLE)
-        if locked:
+        if capturing and items[self.index][0] in self.RADIO_KEYS:
             c.text_center(W // 2, CONTENT_BOTTOM - 11, "Radio settings are locked while capturing", font("ui", 8), AMBER)
 
     def handle(self, key, app):
         items = self.items(app)
+        before = self.index
         if self.move(key, len(items), self.VISIBLE):
+            self._skip_headers(items, 1 if self.index >= before or key.name == "PAGEDOWN" else -1)
+            self.clamp(len(items), self.VISIBLE)
             return True
         if key == "ENTER":
             name = items[self.index][0]
             if name == "about":
                 app.push(About())
-            elif app.engine.state == "capturing":
+            elif app.engine.state == "capturing" and name in self.RADIO_KEYS:
                 app.toast("Stop capture to change radio settings", AMBER)
             elif name in ("meshtastic_keys", "meshcore_keys"):
                 app.push(KeyList(name))
-            else:
+            elif name == "recon_categories":
+                from .recon_screens import Categories
+                app.push(Categories())
+            elif name is not None:
                 app.pick_setting(name)
             return True
         return super().handle(key, app)
@@ -834,6 +1040,38 @@ class KeyList(Screen, ListMixin):
         return True
 
 
+class Help(Details):
+    """Every key in one place."""
+
+    def __init__(self):
+        super().__init__("HELP")
+
+    def rows(self, app):
+        return [
+            ("", "Anywhere", GREEN),
+            ("; . , /", "Up, Down, Left, Right (arrow keys work too)"),
+            ("Enter", "Open, select, send"),
+            ("` or Esc", "Back"),
+            ("Space", "Radio on/off from Home or Wardrive"),
+            ("", "Home", GREEN),
+            ("W R M N", "Wardrive, Recon, Messages, Nodes"),
+            ("P S C H", "Packets, Sessions, Settings, Help"),
+            ("", "Wardrive", GREEN),
+            ("← →", "Hop to the previous or next profile"),
+            ("R  M", "Region, scan mode (when stopped)"),
+            ("", "Recon", GREEN),
+            ("Space", "Start or stop Recon (runs beside Wardrive)"),
+            ("A  S  C", "Show all devices, change sort, pick categories"),
+            ("Enter  F", "Device details, then F to find it by signal"),
+            ("", "Messages", GREEN),
+            ("← →", "Pick a channel tab"),
+            ("Enter", "Write; Tab changes channel; Enter sends"),
+            ("", "Transmit stays off until you turn it on. You're responsible for local radio rules.", MUTED),
+            ("", "Sessions", GREEN),
+            ("E  D", "Export CSV/KML, delete"),
+        ]
+
+
 class About(Screen):
     title = "ABOUT"
 
@@ -842,9 +1080,9 @@ class About(Screen):
         c.paste(mark, (16, TOP + 6))
         c.text((70, TOP + 4), "LORA TUNNEL", font("display", 18), GREEN)
         c.text((70, TOP + 26), "for M5Stack CardputerZero  ·  v" + __version__, font("ui", 9), MUTED)
-        lines = ["Receive-only LoRa mesh wardriving and decoding for",
-                 "Meshtastic and MeshCore. Logs JSONL, SQLite and LoRaTAP",
-                 "PCAP for Wireshark and Kismet-style analysis.",
+        lines = ["LoRa mesh wardriving, decoding and messaging for",
+                 "Meshtastic and MeshCore, plus Wi-Fi/BLE Recon. Logs",
+                 "JSONL, SQLite and LoRaTAP PCAP for Wireshark.",
                  "MIT licensed  ·  github.com/valleytechsolutions/LORA-Tunnel"]
         for i, line in enumerate(lines):
             c.text((70, TOP + 44 + i * 12), line, font("ui", 8), TEXT if i < 3 else FAINT)
@@ -854,10 +1092,6 @@ class About(Screen):
 
 
 # ---------------------------------------------------------------- modals
-class Modal(Screen):
-    modal = True
-
-
 class Picker(Modal, ListMixin):
     VISIBLE = 6
 

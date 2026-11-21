@@ -119,7 +119,9 @@ class Store:
             raise ValueError("Observation exceeded size limit")
         decoded = record.get("decoded", {})
         protocol = decoded.get("protocol", "unknown")
-        node = node_id(decoded)
+        outgoing = record.get("direction") == "tx"
+        # Our own transmissions are logged, but never as a heard node or a LoRaTAP RX frame.
+        node = None if outgoing else node_id(decoded)
         gps = record.get("receiver_gps") or {}
         stamp = record["timestamp"]
         self.db.execute(
@@ -143,7 +145,8 @@ class Store:
                 latest_json=excluded.latest_json""",
                 (protocol, node, stamp, stamp, 1, rssi, summary_text))
         self.stream.write(text + "\n")
-        self.pcap.append(record)
+        if not outgoing:
+            self.pcap.append(record)
         self.count += 1
 
     def flush(self):

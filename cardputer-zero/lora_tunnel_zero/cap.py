@@ -1,4 +1,9 @@
-"""Receive-only SX1262 driver for the M5Stack CardputerZero Cap LoRa-1262.
+"""SX1262 driver for the M5Stack CardputerZero Cap LoRa-1262.
+
+Receive is the normal state. Transmit exists only for user-sent mesh messages:
+it needs `allow_tx` (set from the transmit setting), uses a separate opcode
+allowlist that is open only inside `transmit()`, and always returns to
+continuous receive afterwards.
 
 Adapted from Evil-LORA-Tunnel. The LoRa modem settings and packet representation derive from LORA-Pager-Pipe
 (Copyright 2026 Valleytech Solutions, MIT). The cap uses SPI0 CE1 and a
@@ -21,10 +26,14 @@ _EXT_MUX = Path("/sys/class/leds/ext_usb_gpio_fun/brightness")
 _EXPANDER = 0x43
 _IRQ_MASK = 0x0262  # RX_DONE | HEADER_ERR | CRC_ERR | TIMEOUT
 _BW = {62500: 0x03, 125000: 0x04, 250000: 0x05, 500000: 0x06}
+_TX_IRQ_MASK = 0x0201  # TX_DONE | TIMEOUT
 _RX_COMMANDS = frozenset({
     0x02, 0x08, 0x0D, 0x11, 0x12, 0x13, 0x14, 0x1D, 0x1E, 0x80, 0x82,
     0x86, 0x89, 0x8A, 0x8B, 0x8C, 0x8F, 0x96, 0x97, 0x98, 0x9D,
 })
+# WriteBuffer, SetTx, SetTxParams, SetPaConfig: only inside transmit().
+_TX_COMMANDS = frozenset({0x0E, 0x83, 0x8E, 0x95})
+MAX_TX_DBM = 22
 
 
 def _set_led(path, value, stack):
@@ -108,6 +117,8 @@ class CapRadio:
         self.diagnostics = dict(received=0, timeouts=0, header_errors=0,
                                 crc_errors=0, malformed=0, retunes=0)
         self._resources = None
+        self.allow_tx = False
+        self._tx_window = False
 
     def open(self):
         if self._resources is not None:
@@ -178,8 +189,8 @@ class CapRadio:
         return self
 
     def _command(self, opcode, args=b"", read=0):
-        if opcode not in _RX_COMMANDS:
-            raise RadioError("Unsupported receive operation")
+        if opcode not in _RX_COMMANDS and not (self._tx_window and opcode in _TX_COMMANDS):
+            raise RadioError("Unsupported radio operation")
         deadline = time.monotonic() + 0.5
         while self._gpio.active(_BUSY):
             if time.monotonic() >= deadline:
@@ -220,11 +231,65 @@ class CapRadio:
         self._write_register(0x08AC, b"\x96")  # boosted RX gain
         self._write_register(0x0736, bytes([self._read_register(0x0736)[0] | 0x04]))
         self._write_register(0x08D8, bytes([self._read_register(0x08D8)[0] | 0x1E]))
+        self.profile = profile
+        self._start_rx()
+        self.diagnostics["retunes"] += 1
+
+    def _start_rx(self):
+        profile = self.profile
+        self._command(0x8C, struct.pack(">HBBBB", profile.preamble_symbols, 0, 255, 1, 0))
         self._command(0x08, struct.pack(">HHHH", _IRQ_MASK, _IRQ_MASK, 0, 0))
         self._command(0x02, b"\xff\xff")
         self._command(0x82, b"\xff\xff\xff")  # continuous RX
-        self.profile = profile
-        self.diagnostics["retunes"] += 1
+
+    def transmit(self, payload, profile=None, power_dbm=14, timeout=8.0):
+        """Send one LoRa frame, then resume continuous receive. Returns airtime seconds."""
+        if self._resources is None:
+            raise RadioError("Cap radio is closed")
+        if not self.allow_tx:
+            raise RadioError("Transmit is turned off in Settings")
+        payload = bytes(payload)
+        if not 1 <= len(payload) <= 255:
+            raise RadioError("Frame must be 1 to 255 bytes")
+        if profile is not None and profile != self.profile:
+            self._tune(validate_profile(profile))
+        p = self.profile
+        power = max(-9, min(MAX_TX_DBM, int(power_dbm)))
+        started = time.monotonic()
+        self._tx_window = True
+        try:
+            self._command(0x80, b"\x00")
+            # SX1262 errata 15.1: modulation quality register for 500 kHz vs other bandwidths.
+            quality = self._read_register(0x0889)[0]
+            self._write_register(0x0889, bytes([quality & 0xFB if p.bandwidth_hz == 500000 else quality | 0x04]))
+            self._command(0x95, b"\x04\x07\x00\x01")  # PA config for SX1262 up to +22 dBm
+            self._write_register(0x08E7, b"\x38")       # over-current limit 140 mA
+            self._command(0x8E, struct.pack(">bB", power, 0x04))  # power, 200 us ramp
+            self._command(0x8F, b"\x00\x00")
+            self._command(0x0E, b"\x00" + payload)
+            self._command(0x8C, struct.pack(">HBBBB", p.preamble_symbols, 0, len(payload), 1, 0))
+            self._command(0x08, struct.pack(">HHHH", _TX_IRQ_MASK, _TX_IRQ_MASK, 0, 0))
+            self._command(0x02, b"\xff\xff")
+            steps = min(0xFFFFFF, int(timeout * 64000))
+            self._command(0x83, steps.to_bytes(3, "big"))
+            deadline = time.monotonic() + timeout + 0.5
+            while not self._gpio.active(_IRQ):
+                if time.monotonic() >= deadline:
+                    raise RadioError("SX1262 transmit did not finish")
+                time.sleep(0.005)
+            irq = int.from_bytes(self._command(0x12, read=2), "big")
+            self._command(0x02, b"\xff\xff")
+            if not irq & 0x0001:
+                raise RadioError("SX1262 transmit timed out")
+            self.diagnostics["transmitted"] = self.diagnostics.get("transmitted", 0) + 1
+            return time.monotonic() - started
+        finally:
+            self._tx_window = False
+            try:
+                self._command(0x80, b"\x00")
+                self._start_rx()
+            except RadioError:
+                pass
 
     def receive(self, timeout=0.25):
         if self._resources is None:

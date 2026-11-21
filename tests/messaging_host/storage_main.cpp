@@ -19,7 +19,7 @@ int main(){
   corruptRead=true;CHECK(!s.save("identity-v1",value,sizeof(value)));corruptRead=false;
   shortRead=true;CHECK(s.load("identity-v1",copy,sizeof(copy))==Load::Invalid);CHECK(!s.save("identity-v1",value,sizeof(value)));shortRead=false;
   wrongLength=true;CHECK(s.load("identity-v1",copy,sizeof(copy))==Load::Invalid);CHECK(!s.save("identity-v1",value,sizeof(value)));wrongLength=false;
-  CHECK(!s.save("too-large",value,1025));CHECK(values.count("too-large")==0);CHECK(s.random()==0x12345678);void* memory=s.allocate(3424);CHECK(memory!=nullptr);s.release(memory);
+  CHECK(!s.save("too-large",value,1025));CHECK(values.count("too-large")==0);CHECK(s.random()==0x12345678);void* memory=s.allocate(3464);CHECK(memory!=nullptr);s.release(memory);
   CHECK(opens==closes+2); // The two failed begin() calls do not require end().
   std::printf("Messaging production storage adapter: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

@@ -1,0 +1,4 @@
+# Let the gpio group switch the Cap LoRa-1262's 5 V rail and the cap-bus pin mux.
+# systemd-tmpfiles applies this at every boot; nothing here runs as root.
+z /sys/class/leds/ext_5v_out/brightness 0664 root gpio -
+z /sys/class/leds/ext_usb_gpio_fun/brightness 0664 root gpio -

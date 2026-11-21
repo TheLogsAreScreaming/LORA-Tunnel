@@ -188,6 +188,18 @@ class WifiScanner:
 
 
 # ------------------------------------------------------------------ BLE
+def ble_refusal(name, text=""):
+    """A short, fixable reason BlueZ refused to power on or start discovery."""
+    name, text = str(name or ""), str(text or "").lower()
+    if name.endswith(".Blocked") or "rfkill" in text or "blocked" in text:
+        return "Bluetooth is switched off: run  sudo rfkill unblock bluetooth"
+    if name.endswith((".AccessDenied", ".NotPermitted", ".NotAuthorized")):
+        return "No Bluetooth permission: reboot once after installing"
+    if name.endswith(".NotReady"):
+        return "Bluetooth adapter is not ready: run  sudo rfkill unblock bluetooth"
+    return "Bluetooth refused the scan (%s)" % (name.rsplit(".", 1)[-1] or "unknown")
+
+
 class BleScanner:
     """BlueZ discovery over D-Bus; one long-lived connection keeps discovery on."""
 
@@ -224,7 +236,7 @@ class BleScanner:
             self.started = True
         except dbus.exceptions.DBusException as exc:
             if "InProgress" not in str(exc.get_dbus_name()):
-                raise ReconUnavailable("Bluetooth discovery was refused (is Bluetooth blocked?)") from exc
+                raise ReconUnavailable(ble_refusal(exc.get_dbus_name(), str(exc))) from exc
         return self
 
     def scan(self):

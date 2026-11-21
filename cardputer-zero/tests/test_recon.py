@@ -264,5 +264,15 @@ class ReconUITests(unittest.TestCase):
         self.assertIsInstance(app.stack[1], screens.Help)
 
 
+class BleRefusalTests(unittest.TestCase):
+    def test_reasons_say_how_to_fix(self):
+        from lora_tunnel_zero.recon_scan import ble_refusal
+        self.assertIn("rfkill unblock", ble_refusal("org.bluez.Error.Blocked"))
+        self.assertIn("rfkill unblock", ble_refusal("org.bluez.Error.Failed", "Failed due to rfkill"))
+        self.assertIn("reboot", ble_refusal("org.freedesktop.DBus.Error.AccessDenied"))
+        self.assertIn("rfkill unblock", ble_refusal("org.bluez.Error.NotReady"))
+        self.assertIn("(Weird)", ble_refusal("org.bluez.Error.Weird"))
+
+
 if __name__ == "__main__":
     unittest.main()

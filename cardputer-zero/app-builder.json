@@ -1,12 +1,12 @@
 {
   "package_name": "lora-tunnel",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "app_name": "LORA Tunnel",
   "bin_name": "lora-tunnel",
-  "description": "LoRa mesh wardriver with Meshtastic and MeshCore decode and messaging, plus Wi-Fi/BLE Recon (Cap LoRa-1262)",
+  "description": "All-in-one LoRa, Wi-Fi and BLE wardriver: Meshtastic and MeshCore decoding and chat, WiGLE logging, Recon (Cap LoRa-1262)",
   "store": {
-    "summary": "LoRa mesh wardriver: Meshtastic + MeshCore decode and chat, Wi-Fi/BLE Recon",
-    "description": "LORA Tunnel turns the CardputerZero and Cap LoRa-1262 into a standalone LoRa mesh wardriver. Pick your region and it listens for Meshtastic, MeshCore, both in turn, or surveys every preset to find what your community uses. It decrypts the default channels and any private channel keys you add: node names, roles, positions, telemetry and channel messages. Every frame is saved with its raw bytes and exact radio settings, with your GPS position kept separate from what nodes claim. Logs are JSONL, SQLite and LoRaTAP PCAP (open in Wireshark), with CSV and Google Earth KML export, on the same channel plan as Kismet's LoRaPipe. Messages lets you chat on Meshtastic and MeshCore channels and shows when your message was relayed. Transmit is off until you turn it on, and it keeps to your region's power and duty-cycle limits. Recon scans nearby Wi-Fi and Bluetooth LE for ALPR cameras, Flock devices, body cameras, trackers like AirTag and SmartTag, Remote ID drones and more, rates each match by confidence, warns you, flags anything that seems to follow you, and has a signal finder to locate it.",
+    "summary": "All-in-one LoRa + Wi-Fi/BLE wardriver: full mesh decode, WiGLE logs, Recon",
+    "description": "LORA Tunnel turns the CardputerZero and Cap LoRa-1262 into an all-in-one LoRa, Wi-Fi and Bluetooth wardriver. One press starts all three. It listens for Meshtastic and MeshCore on every preset in your region and decrypts the default channels and any keys you add. It decodes text, positions, node info, all telemetry, traceroutes with per-hop SNR, neighbor lists, map reports, waypoints, MeshCore adverts, group messages, traces and discovery, and maps every node it hears. Every Wi-Fi network and BLE device is logged with GPS into a WiGLE-ready CSV. Recon flags ALPR and Flock cameras, body cameras, Ring and other cameras, trackers like AirTag and SmartTag, Remote ID drones and more, warns you, and tells you if something seems to follow you. Messages lets you chat on Meshtastic and MeshCore channels. Transmit is off until you turn it on, and it keeps to your region's limits. Logs are LoRaTAP PCAP (Wireshark), JSONL and SQLite, with CSV and Google Earth KML export. Same channel plan as Kismet's LoRaPipe. MIT open source.",
     "categories": [
       "Radio & Comms",
       "Security"
@@ -14,9 +14,9 @@
     "screenshots": [
       "screenshots/wardrive-live.png",
       "screenshots/recon-live.png",
+      "screenshots/node-mesh.png",
+      "screenshots/packet-traceroute.png",
       "screenshots/messages.png",
-      "screenshots/nodes.png",
-      "screenshots/recon-detail.png",
       "screenshots/home.png"
     ],
     "icon": "packaging/icon.png",
@@ -39,11 +39,11 @@
     "locales": {
       "zh-CN": {
         "title": "LORA Tunnel",
-        "summary": "LoRa Mesh 扫描器：Meshtastic 与 MeshCore 解码和聊天，Wi-Fi/BLE 侦察"
+        "summary": "LoRa+Wi-Fi/BLE 一体化扫描：Mesh 全解码、WiGLE 记录、侦察"
       },
       "ja": {
         "title": "LORA Tunnel",
-        "summary": "LoRaメッシュ探索：Meshtastic・MeshCoreの解読とチャット、Wi-Fi/BLE偵察"
+        "summary": "LoRa+Wi-Fi/BLE統合ウォードライブ：メッシュ完全解読、WiGLE記録、偵察"
       }
     }
   }

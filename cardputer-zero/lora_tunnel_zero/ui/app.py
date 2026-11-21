@@ -1,12 +1,13 @@
 """Navigation, chrome (status bar and key hints) and the main loop."""
 
+from pathlib import Path
 import shutil
 import time
 
 from PIL import Image
 
 from .. import RadioError, config as configuration, mesh_tx, profiles
-from ..export import export_session
+from ..export import export_recon, export_session
 from ..recon_scan import Recon
 from ..store import list_sessions
 from . import icons, recon_screens, screens
@@ -184,8 +185,15 @@ class App:
         e = self.engine
         if e.state == "capturing":
             e.stop()
+            extra = ""
+            if getattr(self, "_recon_with_capture", False) and self.recon is not None and \
+                    self.recon.state == "running":
+                summary = self.recon.summary()
+                self.recon.stop()
+                extra = "  ·  %d Wi-Fi, %d BLE" % (summary["wifi_total"], summary["ble_total"])
+            self._recon_with_capture = False
             self.session_cache(refresh=True)
-            self.toast("Session saved  ·  %d packets" % e.counters.get("saved", 0) if not e.error
+            self.toast("Session saved  ·  %d packets%s" % (e.counters.get("saved", 0), extra) if not e.error
                        else e.error, GREEN if not e.error else AMBER)
             return
         if not self.cfg.get("region"):
@@ -199,9 +207,18 @@ class App:
             e.error = str(exc) or type(exc).__name__
             self.toast(e.error, RED, 4)
             return
+        label = "Capture started"
+        if self.cfg.get("wardrive_wifi_ble", True) and self.recon is not None and self.recon.state != "running":
+            try:
+                self.recon.cfg = dict(self.cfg)
+                self.recon.start(self.sessions_root())
+                self._recon_with_capture = True
+                label = "Wardriving LoRa + Wi-Fi + BLE"
+            except (OSError, RuntimeError, ValueError):
+                self._recon_with_capture = False
         if show and not isinstance(self.screen, screens.Wardrive):
             self.open("Wardrive")
-        self.toast("Capture started", GREEN)
+        self.toast(label, GREEN)
 
     def pick_region(self, then_start=False):
         options = [(code, region.label, code) for code, region in profiles.REGIONS.items()
@@ -260,6 +277,11 @@ class App:
                 self.save_config(tx_enabled=False)
                 return self.toast("Transmit off  ·  receive only")
             return self.offer_transmit()
+        elif name in ("wardrive_wifi_ble", "wigle_random_ble"):
+            default = name == "wardrive_wifi_ble"
+            if self.recon is not None and self.recon.state == "running" and name == "wigle_random_ble":
+                return self.toast("Stop scanning to change the WiGLE log", AMBER)
+            return self.save_config(**{name: not cfg.get(name, default)})
         elif name in ("recon_wifi", "recon_ble", "recon_sound"):
             if self.recon.state == "running" and name != "recon_sound":
                 return self.toast("Stop Recon to change scanners", AMBER)
@@ -308,7 +330,10 @@ class App:
 
     def export(self, path):
         try:
-            files = export_session(path)
+            if (Path(path) / "recon.jsonl").is_file() and not (Path(path) / "capture.sqlite3").is_file():
+                files = export_recon(path)
+            else:
+                files = export_session(path)
         except (OSError, ValueError) as exc:
             self.toast("Export failed: %s" % exc, RED)
             return

@@ -39,6 +39,9 @@ DEFAULTS = {
     "node_number": 0,
     "node_name": "",
     "node_short": "",
+    # Wi-Fi/BLE wardriving runs with LoRa capture; WiGLE CSV skips random BLE addresses by default
+    "wardrive_wifi_ble": True,
+    "wigle_random_ble": False,
     # Recon
     "recon_wifi": True,
     "recon_ble": True,

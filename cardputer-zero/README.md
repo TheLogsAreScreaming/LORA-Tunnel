@@ -1,12 +1,20 @@
 # LORA Tunnel for M5Stack CardputerZero
 
-LORA Tunnel turns the **M5Stack CardputerZero** and the **Cap LoRa-1262 (U214)** into a standalone LoRa mesh wardriver. It listens for Meshtastic and MeshCore traffic, decrypts the channels you hold keys for, tracks every node it hears, and saves each frame with its raw bytes, exact radio settings and your GPS position. It can also send channel messages, and its **Recon** mode watches nearby Wi-Fi and Bluetooth LE for surveillance devices and trackers.
+LORA Tunnel turns the **M5Stack CardputerZero** and the **Cap LoRa-1262 (U214)** into an all-in-one LoRa, Wi-Fi and Bluetooth wardriver. One press of Space and it:
+
+- listens for **Meshtastic and MeshCore** traffic, decrypts the channels you hold keys for, decodes every common app type (text, positions, node info, all telemetry, traceroutes, neighbor lists, map reports, waypoints and more), and maps every node it hears;
+- logs **every Wi-Fi network and BLE device** around you with GPS into a **WiGLE-ready CSV**;
+- runs **Recon**, which flags surveillance gear and trackers (ALPR and Flock cameras, Axon body cameras, Ring and other cameras, AirTags, Remote ID drones and more), warns you, and tells you if something seems to be following you.
+
+It can also chat on Meshtastic and MeshCore channels. Every LoRa frame is saved with its raw bytes, exact radio settings and your GPS position.
 
 It runs as an APPLaunch app from the CardputerZero store or as a `.deb` you install yourself. It's the CardputerZero member of the LORA Tunnel family, next to the ESP32 firmware for the Cardputer ADV and Heltec V4 in this repository.
 
-| Wardrive | Recon | Messages |
+| Wardrive (LoRa + Wi-Fi + BLE) | Recon | Messages |
 | --- | --- | --- |
 | ![Wardrive](screenshots/wardrive-live@2x.png) | ![Recon](screenshots/recon-live@2x.png) | ![Messages](screenshots/messages@2x.png) |
+| **Mesh node** | **Traceroute** | **Settings** |
+| ![Mesh node](screenshots/node-mesh@2x.png) | ![Traceroute](screenshots/packet-traceroute@2x.png) | ![Settings](screenshots/settings@2x.png) |
 | **Home** | **Recon device** | **Signal finder** |
 | ![Home](screenshots/home@2x.png) | ![Recon device](screenshots/recon-detail@2x.png) | ![Finder](screenshots/recon-finder@2x.png) |
 | **Nodes** | **Packet detail** | **Write a message** |
@@ -18,9 +26,25 @@ The screenshots are rendered from the app's own drawing code with its synthetic 
 
 - **Same channel plan as Kismet's LoRaPipe.** All nine Meshtastic presets at the default slot for each region, explicit slots, and Kismet's MeshCore regional presets. Channel IDs use Kismet's names (`meshtastic-US-LONG_FAST`, `meshcore-US-NARROW`). Frequencies are tested against Kismet's channel reference.
 - **Four scan modes.** Meshtastic only, MeshCore only, both alternating, or **Survey**, which hops every preset and MeshCore profile in your region so you can find what the local community actually uses. Dwell time is adjustable from 5 to 600 seconds. You can hop by hand with ← →.
-- **Decoding.** Meshtastic NodeInfo, position, telemetry and text on the default channels for every preset, plus private channels you add. MeshCore signed adverts (Ed25519-verified), public-channel and hashtag-channel group text, and private channel secrets. Frames it can't decode are still saved.
+- **Meshtastic decoding.** On the default channel of every preset and any private channels you add (AES-128 or AES-256):
+  - text, plus detection-sensor, alert, range-test and store-and-forward messages;
+  - positions with satellites, speed and precision;
+  - node info with hardware model, role and public key;
+  - every telemetry kind: device, environment (temperature, humidity, pressure, wind, rain and more), air quality, power, local mesh stats, health and host;
+  - traceroutes with per-hop SNR both ways, neighbor lists, routing ACKs and errors, map reports (firmware version, region, preset), waypoints and paxcounter.
+
+  Every other port is named, and its raw payload is kept.
+- **MeshCore decoding.**
+  - Adverts with Ed25519 signature checks.
+  - Public, hashtag and private group text, including signed and CLI messages, and group data.
+  - Traces with per-hop SNR, node discovery requests and responses, anonymous requests with the sender's public key, ACKs and multipart packets.
+  - Direct messages are end-to-end encrypted. Their sender and recipient hashes are logged, but their content can't be read.
+- **Every frame is saved**, even ones it can't decode.
 - **Live views.** Packet counts, node count, decode rate, last RSSI and a two-minute activity graph colored by signal. There are sortable node lists, per-node details with distance and bearing to a node's claimed position, a feed of heard channel messages, and a per-packet inspector with a hex dump.
-- **Logs and exports.** Each session folder in `~/LoRaTunnel/sessions/` holds `observations.jsonl`, `capture.sqlite3` and `lora.pcap` (LoRaTAP, link type 270, which opens in Wireshark). One key exports `nodes.csv`, `packets.csv` and a Google Earth `nodes.kml`.
+- **Wi-Fi and BLE wardriving.** While LoRa capture runs, the app also scans Wi-Fi (2.4, 5 and 6 GHz, through NetworkManager or `iw`) and Bluetooth LE (through BlueZ). It logs every network and device, with a GPS fix no more than 10 seconds old, to `wigle.csv` in WiGLE's own WigleWifi-1.6 format, ready to upload at wigle.net. Random BLE addresses are left out of the WiGLE file by default, because they rotate. You can include them in Settings. You can also turn Wi-Fi/BLE off and wardrive LoRa only.
+- **Logs and exports.**
+  - LoRa sessions in `~/LoRaTunnel/sessions/` hold `observations.jsonl`, `capture.sqlite3` and `lora.pcap` (LoRaTAP, link type 270, which opens in Wireshark). One key exports `nodes.csv`, `packets.csv` and a Google Earth `nodes.kml`.
+  - Wi-Fi/BLE sessions hold `recon.jsonl` and `wigle.csv`. One key exports `devices.csv` and a `flagged.kml` map of every flagged device.
 - **Honest location data.** Your receiver fix, from gpsd or the cap's GNSS UART, is stored separately from positions that nodes advertise about themselves. A stale fix is never written as a position.
 - **Receivers.** The Cap LoRa-1262 is the default. A **LoRaPipe** USB radio (RXLOG serial CLI) also works, as does a synthetic demo receiver for trying the app without hardware.
 
@@ -57,7 +81,7 @@ The CardputerZero keyboard works like the Cardputer ADV build: `;` `.` `,` `/` a
 
 | Key | Action |
 | --- | --- |
-| `Space` | Start or stop capture, from Home or Wardrive |
+| `Space` | Start or stop wardriving (LoRa, plus Wi-Fi and BLE), from Home or Wardrive |
 | `Enter` / `Esc` | Open / back |
 | `W` `R` `M` `N` | Jump to Wardrive, Recon, Messages, Nodes |
 | `P` `S` `C` `H` | Jump to Packets, Sessions, Settings, Help |
@@ -75,20 +99,41 @@ On first launch the app asks for your LoRa region. LoRa stays off until a region
 
 ## Install
 
-From the store: open the CardputerZero App Store and enter share code **LORA**, once the listing is live.
+Power the CardputerZero off, fit the Cap LoRa-1262, and power it back on. The cap bus isn't hot-pluggable. Then use any one of these three ways. Every way installs LORA Tunnel next to your other apps, and nothing else is replaced or removed.
 
-By hand: download `lora-tunnel_<version>_all.deb` from the latest CI run or release, then:
+### 1. From the App Store (easiest)
+
+Open the **App Store** on the CardputerZero, enter share code **LORA**, and install. *(Once the store listing is live.)*
+
+### 2. One command on the device
+
+Connect the CardputerZero to Wi-Fi. Open a terminal on it, or SSH in from a computer (`ssh pi@<device-ip>`; run `hostname -I` on the device to find its address). Then paste:
 
 ```sh
-scp lora-tunnel_1.0.0_all.deb pi@<device-ip>:/tmp/
-ssh pi@<device-ip> "sudo apt install -y /tmp/lora-tunnel_1.0.0_all.deb"
+curl -fL -o /tmp/lora-tunnel.deb https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/cardputer-zero-v1.1.0/lora-tunnel-cardputer-zero.deb && sudo apt install -y /tmp/lora-tunnel.deb && sudo reboot
 ```
 
-Power the device off before fitting or removing the cap, because the cap bus isn't hot-pluggable. The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups and installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. Log out and back in, or reboot, once after the first install so the group changes take effect. The app runs as your normal user and ships no root service.
+It downloads the release, installs it with its few Python dependencies, and restarts. LORA Tunnel then appears in APPLaunch. To update later, run the same command with the newer version number. All releases are on the [releases page](https://github.com/valleytechsolutions/LORA-Tunnel/releases).
+
+### 3. Build it yourself from source
+
+```sh
+cd /tmp && curl -fL -o lora.tgz https://github.com/valleytechsolutions/LORA-Tunnel/archive/refs/heads/main.tar.gz \
+  && tar xzf lora.tgz && cd LORA-Tunnel-main/cardputer-zero && python3 tools/build_deb.py --out /tmp \
+  && sudo apt install -y /tmp/lora-tunnel_*_all.deb && sudo reboot
+```
+
+### After installing
+
+- **First launch:** pick your LoRa region. LoRa stays off until you do.
+- **Bluetooth says "switched off":** run `sudo rfkill unblock bluetooth` once. The setting is remembered.
+- **Remove the app:** `sudo apt remove lora-tunnel` removes only LORA Tunnel. Your saved sessions stay in `~/LoRaTunnel`.
+
+The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups. It also installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. That's why one reboot is needed after the first install. The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups and installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. Log out and back in, or reboot, once after the first install so the group changes take effect. The app runs as your normal user and ships no root service.
 
 ## Settings and channel keys
 
-Settings are grouped into Radio, Channels, Messaging and Recon. Settings live in `~/.config/lora-tunnel/config.json` (mode 0600) and can all be changed on the device. To decode a private Meshtastic channel, go to **Settings → Meshtastic keys → A**, then type the exact channel name and its base64 key from the Meshtastic app or channel URL. MeshCore private channels take a 16- or 32-byte base64 secret, and hashtag channels (`#name`) need only the name. Key values are never shown on screen or written to logs.
+Settings are grouped into Radio, Channels, Messaging, Wi-Fi / BLE and Recon. Settings live in `~/.config/lora-tunnel/config.json` (mode 0600) and can all be changed on the device. To decode a private Meshtastic channel, go to **Settings → Meshtastic keys → A**, then type the exact channel name and its base64 key from the Meshtastic app or channel URL. MeshCore private channels take a 16- or 32-byte base64 secret, and hashtag channels (`#name`) need only the name. Key values are never shown on screen or written to logs.
 
 ## Hardware notes
 
@@ -111,16 +156,18 @@ To publish to the CardputerZero store with M5Stack's [czdev](https://github.com/
 ```sh
 czdev login
 cd cardputer-zero
-czdev publish --deb build/lora-tunnel_1.0.0_all.deb
+czdev publish --deb build/lora-tunnel_1.1.0_all.deb
 ```
+
+To publish a GitHub release for the one-command install, bump `version` in `app-builder.json` and `lora_tunnel_zero/__init__.py`. Then create a release tagged `cardputer-zero-v<version>`. The **CardputerZero release** workflow tests the app, builds the `.deb` and attaches it to the release.
 
 The store metadata is in `app-builder.json`. A first release is reviewed by hand: post a short video of the app running on a real CardputerZero in the publish PR, and a maintainer merges it. Later versions merge automatically.
 
 ## Verification status
 
-The radio driver (including transmit and the return to receive), decoder, frame builders, airtime and duty-cycle budget, LoRaTAP writer, session storage, capture engine, Recon parsers and engine, exports, settings and every screen are covered by host tests with mocked hardware and the synthetic receiver and scanners. Outgoing Meshtastic and MeshCore frames are checked by decoding them with the app's own receive decoder. The Recon classifier is checked against the firmware's C++. The package passes the store's own install-path and metadata policy scripts.
+The radio driver (including transmit and the return to receive), the decoders for every Meshtastic app and MeshCore payload type, the WiGLE writer, frame builders, airtime and duty-cycle budget, LoRaTAP writer, session storage, capture engine, Recon parsers and engine, exports, settings and every screen are covered by host tests with mocked hardware and the synthetic receiver and scanners. Outgoing Meshtastic and MeshCore frames are checked by decoding them with the app's own receive decoder. The Recon classifier is checked against the firmware's C++. The package passes the store's own install-path and metadata policy scripts.
 
-Receive, decoding, the UI and capture have been checked on a CardputerZero with the cap. Still worth checking on air: a message received by a stock Meshtastic and MeshCore node, and Recon's Wi-Fi and BLE scans against known devices.
+LoRa capture, decoding, the UI, Bluetooth scanning and Recon have been checked on a CardputerZero with the cap. Still worth checking: a message received by a stock Meshtastic and MeshCore node, and a WiGLE upload of a real `wigle.csv`.
 
 ## License
 

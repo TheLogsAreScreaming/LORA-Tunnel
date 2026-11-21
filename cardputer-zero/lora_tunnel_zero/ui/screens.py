@@ -3,6 +3,7 @@
 Shared keys everywhere: Esc/` goes back, arrows (or ; . , /) move, Enter opens.
 """
 
+import re
 from datetime import datetime
 import shutil
 import time
@@ -295,12 +296,19 @@ class Wardrive(Screen):
         metrics = [("PACKETS", str(n.get("saved", 0)), TEXT), ("NODES", str(len(e.nodes)), TEXT),
                    ("DECODED", decoded, TEXT),
                    ("LAST RSSI", fmt_rssi(last["rssi"]) if last else "—", rssi_color(last["rssi"]) if last else FAINT)]
-        cw = (W - 8 - 9) / 4
+        r = app.recon
+        if r is not None and r.state == "running":
+            # Wi-Fi/BLE wardriving runs alongside: show its session totals in place of the decode rate.
+            summary = r.summary()
+            metrics = metrics[:2] + [("WI-FI", str(summary["wifi_total"]), CYAN),
+                                     ("BLE", str(summary["ble_total"]), CYAN)] + metrics[3:]
+        cw = (W - 8 - 3 * (len(metrics) - 1)) / len(metrics)
+        size = 16 if len(metrics) <= 4 else 14
         for i, (label, value, color) in enumerate(metrics):
             x = 4 + i * (cw + 3)
             c.rect((x, y, x + cw, y + 33), fill=SURFACE, radius=5)
-            c.text((x + 7, y + 4), label, font("bold", 7), MUTED)
-            c.text((x + 7, y + 13), value, font("display", 16), color)
+            c.text((x + 6, y + 4), label, font("bold", 7), MUTED)
+            c.text((x + 6, y + 13), value, font("display", size), color)
         y += 37
         gh = 34
         c.rect((4, y, W - 4, y + gh), fill=SURFACE, radius=5)
@@ -429,7 +437,9 @@ class Details(Screen, ListMixin):
             y = TOP + i * 13
             if label:
                 c.text((8, y), label, font("ui", 9), MUTED)
-            c.text((78 if label else 8, y), value, font("mono", 9), color, width=W - (90 if label else 20))
+            # label None marks the continuation of a labelled value: keep it in the value column.
+            x = 78 if (label or label is None) else 8
+            c.text((x, y), value, font("mono", 9), color, width=W - (90 if x == 78 else 20))
         self.index = self.top
         self.scrollbar(c, len(rows), self.VISIBLE)
 
@@ -440,7 +450,7 @@ class Details(Screen, ListMixin):
             width = W - (90 if label else 20)
             lines = c.wrap(str(value), width, font("mono", 9)) or [""]
             out.append((label, lines[0], color))
-            out.extend(("", line, color) for line in lines[1:])
+            out.extend((None if label else "", line, color) for line in lines[1:])
         return out
 
     def handle(self, key, app):
@@ -477,7 +487,17 @@ class PacketDetail(Details):
         if d.get("node_position"):
             pos = d["node_position"]
             rows.append(("Advertised", "%.5f, %.5f" % (pos["latitude"], pos["longitude"])))
-        if d.get("telemetry"):
+        details = d.get("details") or []
+        names = {}
+        for (protocol, node_id), node in list(app.engine.nodes.items()):
+            if protocol == "meshtastic" and (node.get("short_name") or node.get("name")):
+                names[node_id] = node.get("short_name") or node.get("name")
+        for item in details:
+            label, value = item[0], item[1]
+            # Show known nodes by their short name in routes and neighbor lists.
+            value = re.sub(r"![0-9a-f]{8}", lambda m: names.get(m.group(0), m.group(0)), str(value))
+            rows.append((label, value, CYAN if label else MUTED))
+        if d.get("telemetry") and not details:
             rows.append(("Telemetry", ", ".join("%s %s" % (k.replace("_", " "), round(v, 2))
                                                 for k, v in d["telemetry"].items())))
         if "signature_valid" in d:
@@ -566,7 +586,7 @@ class NodeDetail(Details):
         rows = [("Name", node.get("name") or "—", TEXT),
                 ("Protocol", node["protocol"], PROTOCOL_COLOR.get(node["protocol"], MUTED)),
                 ("ID", node["id"])]
-        for label, key in (("Short", "short_name"), ("Role", "node_type"), ("Hardware", "hardware_model")):
+        for label, key in (("Short", "short_name"), ("Role", "node_type"), ("Hardware", "hardware_name")):
             if node.get(key) not in (None, ""):
                 rows.append((label, node[key]))
         rows += [("Signal", "%s dBm now, best %s dBm, SNR %s" % (fmt_rssi(node.get("rssi")),
@@ -595,6 +615,37 @@ class NodeDetail(Details):
         if "channel_utilization" in telemetry:
             rows.append(("Ch. util", "%.1f%%  airtime %.1f%%" % (telemetry["channel_utilization"],
                                                                  telemetry.get("air_util_tx", 0))))
+        report = node.get("map_report") or {}
+        if report.get("firmware_version"):
+            rows.append(("Firmware", report["firmware_version"]))
+        if report.get("modem_preset") or report.get("region"):
+            rows.append(("Radio", " ".join(x for x in (report.get("region"), report.get("modem_preset")) if x)))
+        for name, label, unit in (("temperature_c", "Temperature", "°C"), ("humidity", "Humidity", "%"),
+                                  ("pressure_hpa", "Pressure", " hPa"), ("pm25", "PM2.5", " µg/m³"),
+                                  ("co2_ppm", "CO₂", " ppm"), ("nodes_online", "Sees online", " nodes"),
+                                  ("noise_floor_dbm", "Noise floor", " dBm")):
+            if name in telemetry:
+                value = telemetry[name]
+                rows.append((label, ("%.1f" % value if isinstance(value, float) else str(value)) + unit))
+        pax = node.get("paxcounter")
+        if pax:
+            rows.append(("People near", "%d Wi-Fi, %d BLE" % (pax["wifi"], pax["ble"])))
+        neighbors = node.get("neighbors") or []
+        if neighbors:
+            rows.append(("Neighbors", "%d heard directly" % len(neighbors), CYAN))
+            for item in neighbors[:8]:
+                label = item["id"]
+                known = app.engine.nodes.get((node["protocol"], item["id"]))
+                if known and (known.get("short_name") or known.get("name")):
+                    label = "%s (%s)" % (known.get("short_name") or known.get("name"), item["id"])
+                snr = item.get("snr")
+                rows.append(("", "%s  SNR %s" % (label, "%+.1f dB" % snr if snr is not None else "?"), MUTED))
+        if node.get("last_route") is not None:
+            rows.append(("Route", " → ".join([node["id"]] + list(node["last_route"])) or "direct"))
+        apps = node.get("apps") or {}
+        if apps:
+            rows.append(("Sends", ", ".join("%s ×%d" % (k.replace("_", " "), v)
+                                            for k, v in sorted(apps.items(), key=lambda kv: -kv[1])[:6])))
         for text in list(node.get("texts", []))[:4]:
             rows.append(("Said", text, GREEN))
         return rows
@@ -834,6 +885,21 @@ class SessionDetail(Details):
         m = self.meta
         counters = m.get("counters", {})
         start, end = m.get("started_at"), m.get("ended_at")
+        if m.get("kind") == "recon":
+            rows = [("Folder", self.path.name), ("Kind", "Wi-Fi / BLE wardrive + Recon", CYAN),
+                    ("Status", m.get("status", "?"), GREEN if m.get("status") == "closed" else AMBER),
+                    ("Started", datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M:%S") if start else "—"),
+                    ("Duration", clock(end - start) if start and end else "—"),
+                    ("Devices", "%d seen, %d flagged" % (m.get("devices", 0), m.get("classified", 0))),
+                    ("WiGLE rows", str(counters.get("wigle_rows", 0)))]
+            for category, count in sorted((m.get("by_category") or {}).items(), key=lambda kv: -kv[1]):
+                rows.append(("", "%s ×%d" % (recon.CATEGORY_LABELS.get(category, category), count), MUTED))
+            for error in m.get("errors", []):
+                rows.append(("Error", error, AMBER))
+            rows.append(("Files", "recon.jsonl, wigle.csv (upload to wigle.net)", MUTED))
+            if (self.path / "export").is_dir():
+                rows.append(("Exported", "export/devices.csv, flagged.kml", GREEN))
+            return rows
         rows = [("Folder", self.path.name),
                 ("Status", m.get("status", "?"), GREEN if m.get("status") == "closed" else AMBER),
                 ("Started", datetime.fromtimestamp(start).strftime("%Y-%m-%d %H:%M:%S") if start else "—"),
@@ -911,6 +977,9 @@ class Settings(Screen, ListMixin):
             ("tx_power_dbm", "Transmit power", "%d dBm%s" % (min(cfg.get("tx_power_dbm", 17), cap),
                                                              " (region cap)" if cfg.get("tx_power_dbm", 17) > cap else "")),
             ("hop_limit", "Hop limit", str(cfg.get("hop_limit", 3))),
+            (None, "WI-FI / BLE", ""),
+            ("wardrive_wifi_ble", "With LoRa capture", on("wardrive_wifi_ble")),
+            ("wigle_random_ble", "WiGLE random BLE", "Include" if cfg.get("wigle_random_ble") else "Skip"),
             (None, "RECON", ""),
             ("recon_wifi", "Scan Wi-Fi", on("recon_wifi")),
             ("recon_ble", "Scan BLE", on("recon_ble")),
@@ -1057,6 +1126,7 @@ class Help(Details):
             ("W R M N", "Wardrive, Recon, Messages, Nodes"),
             ("P S C H", "Packets, Sessions, Settings, Help"),
             ("", "Wardrive", GREEN),
+            ("Space", "Wardrive LoRa, Wi-Fi and BLE together (Settings → Wi-Fi / BLE)"),
             ("← →", "Hop to the previous or next profile"),
             ("R  M", "Region, scan mode (when stopped)"),
             ("", "Recon", GREEN),
@@ -1069,6 +1139,7 @@ class Help(Details):
             ("", "Transmit stays off until you turn it on. You're responsible for local radio rules.", MUTED),
             ("", "Sessions", GREEN),
             ("E  D", "Export CSV/KML, delete"),
+            ("", "Wi-Fi/BLE sessions keep wigle.csv, ready to upload to wigle.net.", MUTED),
         ]
 
 

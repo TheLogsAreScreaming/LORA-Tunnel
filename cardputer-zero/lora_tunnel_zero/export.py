@@ -95,3 +95,69 @@ def export_session(directory):
            % (escape(directory.name), "".join(placemarks)))
     (out / "nodes.kml").write_text(kml, encoding="utf8")
     return [out / "nodes.csv", out / "nodes.kml", out / "packets.csv"]
+
+
+def export_recon(directory):
+    """Wi-Fi/BLE session: devices.csv (every device, best signal and where) and flagged.kml."""
+    directory = Path(directory)
+    source = directory / "recon.jsonl"
+    if not source.is_file():
+        raise ValueError("This session has no Wi-Fi/BLE log")
+    devices = {}
+    with source.open(encoding="utf8", errors="replace") as stream:
+        for line in stream:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict) or "address" not in item:
+                continue
+            key = (item.get("transport"), item["address"])
+            entry = devices.setdefault(key, {"transport": item.get("transport"), "address": item["address"],
+                                             "first_seen": item.get("timestamp"), "sightings": 0,
+                                             "best_rssi_dbm": None, "lat": "", "lon": ""})
+            entry["sightings"] += 1
+            entry["last_seen"] = item.get("timestamp")
+            entry["name"] = item.get("ssid") or item.get("name") or entry.get("name", "")
+            for field in ("channel", "security", "address_type"):
+                if item.get(field) is not None:
+                    entry[field] = item[field]
+            cls = item.get("classification") or {}
+            if item.get("shown") and cls.get("category"):
+                entry.update(category=cls.get("category"), label=cls.get("label", ""),
+                             confidence=cls.get("confidence_name", ""), evidence=cls.get("evidence", ""))
+            if item.get("following"):
+                entry["following"] = True
+            rssi, gps = item.get("rssi_dbm"), item.get("receiver_gps") or {}
+            if isinstance(rssi, (int, float)) and (entry["best_rssi_dbm"] is None or rssi > entry["best_rssi_dbm"]):
+                entry["best_rssi_dbm"] = rssi
+                if gps.get("valid"):
+                    entry["lat"], entry["lon"] = gps.get("latitude", ""), gps.get("longitude", "")
+    out = directory / "export"
+    out.mkdir(mode=0o700, exist_ok=True)
+    fields = ["transport", "address", "name", "category", "label", "confidence", "evidence", "following",
+              "first_seen", "last_seen", "sightings", "best_rssi_dbm", "lat", "lon", "channel", "security",
+              "address_type"]
+    rows = sorted(devices.values(), key=lambda d: (not d.get("category"), -(d["best_rssi_dbm"] or -999)))
+    with (out / "devices.csv").open("w", newline="", encoding="utf8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(dict(row, first_seen=_iso(row.get("first_seen")), last_seen=_iso(row.get("last_seen"))))
+    placemarks = []
+    for row in rows:
+        if not row.get("category") or row["lat"] == "":
+            continue
+        name = "%s %s" % (row.get("label") or row["category"], row.get("name") or row["address"])
+        detail = "%s %s, %s, best %s dBm%s" % (row["transport"], row["address"], row.get("evidence", ""),
+                                              row["best_rssi_dbm"], ", FOLLOWING" if row.get("following") else "")
+        placemarks.append("<Placemark><name>%s</name><description>%s</description>"
+                          "<Point><coordinates>%f,%f,0</coordinates></Point></Placemark>"
+                          % (escape(name), escape(detail), float(row["lon"]), float(row["lat"])))
+    kml = ('<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+           "<name>LORA Tunnel Recon %s</name>%s</Document></kml>\n" % (escape(directory.name), "".join(placemarks)))
+    (out / "flagged.kml").write_text(kml, encoding="utf8")
+    files = [out / "devices.csv", out / "flagged.kml"]
+    if (directory / "wigle.csv").is_file():
+        files.append(directory / "wigle.csv")
+    return files

@@ -164,26 +164,64 @@ class DemoRadio:
             return meshcore_group_text(ident.name, r.choice(TEXTS))
         node, name, short, role, hw = r.choice(MT_NODES)
         choice = r.random()
-        if choice < 0.25:
+        f32 = lambda number, value: _varint(number << 3 | 5) + struct.pack("<f", value)  # noqa: E731
+        u32 = lambda number, value: _varint(number << 3 | 5) + struct.pack("<I", value)  # noqa: E731
+        if choice < 0.2:
             payload = (_field(1, ("!%08x" % node).encode()) + _field(2, name.encode())
                        + _field(3, short.encode()) + _uint(5, hw) + _uint(7, role))
             port = 4
-        elif choice < 0.5:
+        elif choice < 0.4:
             lat = self.base[0] + r.uniform(-0.03, 0.03)
             lon = self.base[1] + r.uniform(-0.03, 0.03)
-            payload = _fixed32(1, int(lat * 1e7)) + _fixed32(2, int(lon * 1e7)) + _uint(3, r.randint(5, 400))
+            payload = (_fixed32(1, int(lat * 1e7)) + _fixed32(2, int(lon * 1e7)) + _uint(3, r.randint(5, 400))
+                       + _uint(19, r.randint(4, 14)))
             port = 3
-        elif choice < 0.75:
-            device = (_uint(1, r.randint(20, 100)) + _varint(2 << 3 | 5) + struct.pack("<f", r.uniform(3.6, 4.2))
-                      + _varint(3 << 3 | 5) + struct.pack("<f", r.uniform(1, 30)) + _uint(5, r.randint(100, 900000)))
+        elif choice < 0.55:
+            device = (_uint(1, r.randint(20, 100)) + f32(2, r.uniform(3.6, 4.2)) + f32(3, r.uniform(1, 30))
+                      + _uint(5, r.randint(100, 900000)))
             payload = _field(2, device)
             port = 67
+        elif choice < 0.62:
+            env = f32(1, r.uniform(8, 31)) + f32(2, r.uniform(20, 80)) + f32(3, r.uniform(995, 1025))
+            payload = _field(3, env)
+            port = 67
+        elif choice < 0.69:
+            neighbors = b"".join(_field(4, _uint(1, other[0]) + f32(2, round(r.uniform(-12, 10), 2)))
+                                 for other in MT_NODES if other[0] != node and r.random() < 0.7)
+            payload = _uint(1, node) + _uint(3, 900) + neighbors
+            port = 71
+        elif choice < 0.75:
+            others = [other[0] for other in MT_NODES if other[0] != node]
+            r.shuffle(others)
+            destination, hops = others[0], others[1:1 + r.randint(1, 3)]
+            payload = (_field(1, b"".join(struct.pack("<I", h) for h in hops))
+                       + _field(2, b"".join(_varint(r.randint(-40, 40) & 0xFFFFFFFFFFFFFFFF)
+                                            for _ in range(len(hops) + 1))))
+            port = 70
+            data = _uint(1, port) + _field(2, payload) + u32(6, r.randint(1, 0xFFFFFFF))
+            return self._mt_data(node, data, r, destination)
+        elif choice < 0.8:
+            payload = (_field(1, name.encode()) + _field(2, short.encode()) + _uint(3, role) + _uint(4, hw)
+                       + _field(5, b"2.7.15.567b8ea") + _uint(6, 1) + _uint(7, 0) + _uint(8, 1)
+                       + _fixed32(9, int((self.base[0] + 0.01) * 1e7)) + _fixed32(10, int((self.base[1] - 0.02) * 1e7))
+                       + _uint(13, r.randint(5, 40)))
+            port = 73
         else:
             payload = r.choice(TEXTS).encode()
             port = 1
         hop_start = 3
         return meshtastic_frame(node, port, payload, self._packet, self.profile.label,
                                 (r.randint(0, hop_start), hop_start))
+
+    def _mt_data(self, node, data, r, destination=0xFFFFFFFF):
+        nonce = struct.pack("<QII", self._packet, node, 0)
+        channel_hash = 0
+        for byte in self.profile.label.encode() + DEFAULT_MESHTASTIC_KEY:
+            channel_hash ^= byte
+        hop_start = 3
+        flags = (r.randint(0, hop_start) & 7) | (hop_start << 5)
+        header = struct.pack("<IIIBBBB", destination, node, self._packet, flags, channel_hash, 0, node & 0xFF)
+        return header + _aes_ctr(DEFAULT_MESHTASTIC_KEY, nonce, data)
 
     def receive(self, timeout=0.25):
         now = self.clock()

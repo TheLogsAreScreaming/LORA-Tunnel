@@ -349,5 +349,79 @@ class BleScannerRetryTests(unittest.TestCase):
             self.assertEqual(state["starts"], 2)
 
 
+class WigleTests(unittest.TestCase):
+    def test_auth_strings(self):
+        from lora_tunnel_zero.recon_scan import wigle_auth
+        self.assertEqual(wigle_auth("open"), "[ESS]")
+        self.assertEqual(wigle_auth("WPA1 WPA2"), "[WPA][WPA2][ESS]")
+        self.assertEqual(wigle_auth("WPA2/3"), "[WPA2][ESS]")
+        self.assertEqual(wigle_auth("WPA2 802.1X"), "[WPA2][EAP][ESS]")
+
+    def test_rows_need_a_fresh_fix_and_skip_random_ble(self):
+        from lora_tunnel_zero.recon_scan import WigleWriter
+        fix = {"valid": True, "age_seconds": 1, "latitude": 37.5, "longitude": -122.25, "altMSL": 12.0,
+               "epx": 4.0, "epy": 6.5}
+        wifi = {"bssid": "AA:BB:CC:00:11:22", "ssid": "Cafe\nGuest", "rssi": -61.0, "channel": 6,
+                "frequency": 2437, "security": "WPA2"}
+        row = WigleWriter.row("wifi", wifi, fix, 1700000000)
+        self.assertEqual(row, ["AA:BB:CC:00:11:22", "Cafe\\nGuest", "[WPA2][ESS]", "2023-11-14 22:13:20", 6, 2437,
+                               -61, 37.5, -122.25, 12.0, 6.5, "", "", "WIFI"])
+        self.assertIsNone(WigleWriter.row("wifi", wifi, {"valid": False}, 1700000000))
+        self.assertIsNone(WigleWriter.row("wifi", wifi, dict(fix, age_seconds=30), 1700000000))
+        ble = {"address": "58:8E:81:A0:12:34", "address_type": 0, "rssi": -70, "name": "Tag",
+               "manufacturer": {0x09C8: b"x", 0x004C: b"y"}}
+        self.assertEqual(WigleWriter.row("ble", ble, fix, 1700000000)[2:3] + WigleWriter.row(
+            "ble", ble, fix, 1700000000)[12:], ["Misc [LE]", 0x004C, "BLE"])
+        self.assertIsNone(WigleWriter.row("ble", dict(ble, address_type=1), fix, 1700000000))
+        self.assertIsNotNone(WigleWriter.row("ble", dict(ble, address_type=1), fix, 1700000000, True))
+
+    def test_recon_session_writes_wigle_csv(self):
+        gps = GPS(use_uart=False)
+        gps.update({"class": "TPV", "mode": 3, "lat": 37.0, "lon": -122.0})
+        r = Recon(dict(config.DEFAULTS), gps, wifi=DemoWifi(), ble=DemoBle(), sound=FakeSound())
+        r.start(Path(tempfile.mkdtemp()))
+        time.sleep(2.5)
+        r.stop()
+        lines = (r.directory / "wigle.csv").read_text().splitlines()
+        self.assertTrue(lines[0].startswith("WigleWifi-1.6,appRelease=LORA-Tunnel-Zero-"))
+        self.assertEqual(lines[1].split(","), list(__import__("lora_tunnel_zero.recon_scan",
+                                                              fromlist=["x"]).WIGLE_COLUMNS))
+        types = {line.rsplit(",", 1)[1] for line in lines[2:]}
+        self.assertEqual(types, {"WIFI", "BLE"})
+        summary = r.summary()
+        self.assertEqual(summary["wigle_rows"], len(lines) - 2)
+        from lora_tunnel_zero.export import export_recon
+        files = export_recon(r.directory)
+        devices = (r.directory / "export" / "devices.csv").read_text().splitlines()
+        self.assertGreater(len(devices), 10)
+        self.assertIn("<Placemark>", (r.directory / "export" / "flagged.kml").read_text())
+        self.assertIn(r.directory / "wigle.csv", files)
+        meta = json.loads((r.directory / "session.json").read_text())
+        self.assertEqual(meta["counters"]["wigle_rows"], summary["wigle_rows"])
+        self.assertGreaterEqual(summary["wifi_total"], 5)
+        self.assertGreater(summary["ble_total"], 0)
+
+    def test_capture_also_wardrives_wifi_and_ble(self):
+        root = Path(tempfile.mkdtemp())
+        e = Engine(dict(config.DEFAULTS, region="US", backend="demo"),
+                   radio_factory=lambda c, p: DemoRadio(p), gps=GPS(use_uart=False))
+        r = Recon(e.cfg, e.gps, wifi=DemoWifi(), ble=DemoBle(), sound=FakeSound())
+        app = App(PNGDisplay(root / "f.png"), ScriptedInput(), e, e.cfg, config_path=root / "c.json",
+                  data_root=root, splash=False, recon=r)
+        app.toggle_capture()
+        self.addCleanup(r.stop)
+        self.addCleanup(e.stop)
+        self.assertEqual((e.state, r.state), ("capturing", "running"))
+        time.sleep(1.5)
+        app.compose()                                   # Wardrive shows Wi-Fi and BLE tiles
+        app.toggle_capture()
+        self.assertEqual(r.state, "idle")
+        self.assertIn("Wi-Fi", app.toast_text)
+        app.save_config(wardrive_wifi_ble=False)
+        app.toggle_capture()
+        self.assertEqual(r.state, "idle")
+        app.toggle_capture()
+
+
 if __name__ == "__main__":
     unittest.main()

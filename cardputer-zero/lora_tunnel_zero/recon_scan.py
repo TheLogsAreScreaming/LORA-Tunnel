@@ -277,6 +277,97 @@ class BleScanner:
         self.bus = self.adapter = None
 
 
+# ------------------------------------------------------------------ WiGLE CSV
+WIGLE_COLUMNS = ("MAC", "SSID", "AuthMode", "FirstSeen", "Channel", "Frequency", "RSSI", "CurrentLatitude",
+                 "CurrentLongitude", "AltitudeMeters", "AccuracyMeters", "RCOIs", "MfgrId", "Type")
+WIGLE_FIX_SECONDS = 10
+
+
+def wigle_auth(security):
+    """WiGLE-style capability string from iw/nmcli security text."""
+    text = (security or "").upper()
+    if not text or text in ("OPEN", "--", "NONE"):
+        return "[ESS]"
+    parts = []
+    for token in re.split(r"[\s/,]+", text):
+        if not token:
+            continue
+        if token in ("WPA1", "WPA"):
+            parts.append("[WPA]")
+        elif token.startswith("WPA") or token == "WEP":
+            parts.append("[%s]" % token)
+        elif token in ("802.1X", "EAP"):
+            parts.append("[EAP]")
+        elif token == "OWE":
+            parts.append("[OWE]")
+    return "".join(dict.fromkeys(parts)) + "[ESS]"
+
+
+def _csv_text(value):
+    value = str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+    return value
+
+
+class WigleWriter:
+    """Live WigleWifi-1.6 CSV: one row per device per sighting interval, only with a fresh GPS fix."""
+
+    def __init__(self, path, version, include_random_ble=False):
+        import csv
+        self.path = Path(path)
+        new = not self.path.exists()
+        fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        self.file = os.fdopen(fd, "a", encoding="utf-8", newline="")
+        self.writer = csv.writer(self.file, lineterminator="\n")
+        self.include_random_ble = include_random_ble
+        self.rows = 0
+        if new:
+            self.writer.writerow(["WigleWifi-1.6", "appRelease=LORA-Tunnel-Zero-" + version,
+                                  "model=CardputerZero", "release=" + version, "device=LORA-Tunnel",
+                                  "display=embedded", "board=CardputerZero+CapLoRa1262", "brand=Valleytech"])
+            self.writer.writerow(WIGLE_COLUMNS)
+            self.file.flush()
+
+    @staticmethod
+    def row(transport, item, gps, now, include_random_ble=False):
+        if not gps.get("valid") or (gps.get("age_seconds") or 0) > WIGLE_FIX_SECONDS:
+            return None
+        lat, lon = gps.get("latitude"), gps.get("longitude")
+        rssi = item.get("rssi")
+        if not isinstance(rssi, (int, float)) or lat is None or lon is None:
+            return None
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))
+        altitude = gps.get("altMSL", gps.get("altHAE", ""))
+        errors = [gps[k] for k in ("epx", "epy") if isinstance(gps.get(k), (int, float))]
+        accuracy = round(max(errors), 1) if errors else ""
+        if transport == "wifi":
+            freq = item.get("frequency")
+            return [item["bssid"], _csv_text(item.get("ssid")), wigle_auth(item.get("security")), stamp,
+                    item.get("channel") or "", freq or "", int(round(rssi)), round(lat, 7), round(lon, 7),
+                    altitude, accuracy, "", "", "WIFI"]
+        if item.get("address_type", 1) != 0 and not include_random_ble:
+            # Random BLE addresses rotate; WiGLE and privacy are both better without them.
+            return None
+        manufacturer = item.get("manufacturer") or {}
+        mfgr = min(manufacturer) if manufacturer else ""
+        return [item["address"], _csv_text(item.get("name")), "Misc [LE]", stamp, 0, "", int(round(rssi)),
+                round(lat, 7), round(lon, 7), altitude, accuracy, "", mfgr, "BLE"]
+
+    def write(self, transport, item, gps, now):
+        row = self.row(transport, item, gps, now, self.include_random_ble)
+        if row is None:
+            return False
+        self.writer.writerow(row)
+        self.file.flush()
+        self.rows += 1
+        return True
+
+    def close(self):
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
+
 # ------------------------------------------------------------------ alerts
 def _tone(path):
     rate = 22050
@@ -336,11 +427,15 @@ class Recon:
         self.unseen_alerts = 0
         self.directory = None
         self.started = 0.0
-        self.counters = dict(wifi_scans=0, ble_scans=0, observations=0, classified=0, alerts=0, log_errors=0)
+        self.counters = dict(wifi_scans=0, ble_scans=0, observations=0, classified=0, alerts=0, log_errors=0,
+                             wigle_rows=0)
         self._stop = threading.Event()
         self._threads = []
         self._log = None
+        self._wigle = None
         self._cache = {}
+        self._seen = set()
+        self.totals = {"wifi": 0, "ble": 0}
 
     # -- configuration -------------------------------------------------
     def enabled(self, category):
@@ -358,10 +453,13 @@ class Recon:
             return
         self.errors.clear()
         self.devices.clear()
+        self._seen = set()
+        self.totals = {"wifi": 0, "ble": 0}
         self.alerts.clear()
         self._cache.clear()
         self.unseen_alerts = 0
-        self.counters = dict(wifi_scans=0, ble_scans=0, observations=0, classified=0, alerts=0, log_errors=0)
+        self.counters = dict(wifi_scans=0, ble_scans=0, observations=0, classified=0, alerts=0, log_errors=0,
+                             wigle_rows=0)
         self.directory = create_session(sessions_root)
         meta = read_metadata(self.directory)
         meta.update(kind="recon", status="capturing", started_at=time.time(),
@@ -371,6 +469,13 @@ class Recon:
         atomic_json(self.directory / "session.json", meta)
         fd = os.open(str(self.directory / "recon.jsonl"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         self._log = os.fdopen(fd, "a", encoding="utf-8")
+        try:
+            from . import __version__
+            self._wigle = WigleWriter(self.directory / "wigle.csv", __version__,
+                                      bool(self.cfg.get("wigle_random_ble", False)))
+        except OSError:
+            self._wigle = None
+            self.errors["storage"] = "WiGLE log could not be created"
         self._stop.clear()
         self.started = time.monotonic()
         self._threads = []
@@ -405,6 +510,9 @@ class Recon:
                 except OSError:
                     self.counters["log_errors"] += 1
                 self._log = None
+            if self._wigle is not None:
+                self._wigle.close()
+                self._wigle = None
         try:
             meta = read_metadata(self.directory)
             classified = [d for d in self.devices.values() if d.get("category")]
@@ -468,13 +576,16 @@ class Recon:
         with self.lock:
             self.counters["observations"] += 1
             device = self.devices.get(key)
+            if key not in self._seen and len(self._seen) < 200000:
+                self._seen.add(key)
+                self.totals[transport] += 1
             if device is None:
                 if len(self.devices) >= MAX_DEVICES:
                     oldest = min(self.devices, key=lambda k: self.devices[k]["last_seen"])
                     del self.devices[oldest]
                 device = self.devices[key] = {"transport": transport, "address": address, "first_seen": now,
                                               "count": 0, "best_rssi": rssi, "rssi_history": deque(maxlen=60),
-                                              "places": [], "alerted_at": 0.0, "logged_at": 0.0,
+                                              "places": [], "alerted_at": 0.0, "logged_at": 0.0, "wigle_at": 0.0,
                                               "follow": False, "category": None, "confidence": 0}
             device["count"] += 1
             device["last_seen"] = now
@@ -519,6 +630,13 @@ class Recon:
                 self.alerts.appendleft(alert)
                 self.unseen_alerts += 1
                 self.counters["alerts"] += 1
+            if self._wigle is not None and gps.get("valid") and now - device["wigle_at"] >= LOG_INTERVAL:
+                try:
+                    if self._wigle.write(transport, item, gps, now):
+                        device["wigle_at"] = now
+                        self.counters["wigle_rows"] += 1
+                except (OSError, ValueError):
+                    self.counters["log_errors"] += 1
             if changed or alert or now - device["logged_at"] >= LOG_INTERVAL:
                 device["logged_at"] = now
                 log_record = {"timestamp": now, "transport": transport, "address": address,
@@ -589,7 +707,9 @@ class Recon:
                 "ble": sum(1 for d in active if d["transport"] == "ble"),
                 "flagged": sum(1 for d in active if d.get("category")),
                 "strong": sum(1 for d in active if d.get("category") and d.get("confidence", 0) >= recon.STRONG),
-                "following": sum(1 for d in devices if d.get("follow"))}
+                "following": sum(1 for d in devices if d.get("follow")),
+                "wifi_total": self.totals["wifi"], "ble_total": self.totals["ble"],
+                "wigle_rows": self.counters.get("wigle_rows", 0)}
 
 
 def _jsonable(value):

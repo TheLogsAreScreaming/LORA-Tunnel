@@ -49,7 +49,7 @@ def main():
     app = App(display, ScriptedInput(), engine, cfg, config_path=work / "config.json",
               data_root=work, splash=False, recon=recon_engine)
 
-    def shot(name, screen=None, modal=None, alert=False):
+    def shot(name, screen=None, modal=None, alert=False, top=None):
         recon_engine.unseen_alerts = 1 if alert else 0
         gps.update({"class": "TPV", "mode": 3, "lat": 37.7790, "lon": -122.4170, "satellites": 9})
         app.stack = [screens.Home()]
@@ -58,6 +58,9 @@ def main():
         if modal is not None:
             app.stack.append(modal)
         img = app.compose()
+        if top is not None:
+            screen.top = top
+            img = app.compose()
         img.save(out / (name + ".png"))
         img.resize((640, 340), resample=0).save(out / (name + "@2x.png"))
         print("wrote", name)
@@ -68,8 +71,7 @@ def main():
     img.resize((640, 340), resample=0).save(out / "splash@2x.png")
     shot("wardrive-ready", screens.Wardrive())
     shot("recon-ready", recon_screens.Recon())
-    app.toggle_capture()
-    app.toggle_recon()
+    app.toggle_capture()          # starts LoRa, Wi-Fi and BLE wardriving together
     engine.hop(0)
     time.sleep(args.seconds / 2)
     engine.hop(1)
@@ -82,6 +84,12 @@ def main():
     shot("packets", screens.Packets())
     decoded = next(item for item in engine.recent if item["text"])
     shot("packet-detail", screens.PacketDetail(decoded))
+    mapped = [n for n in engine.node_list() if n.get("neighbors")]
+    if mapped:
+        shot("node-mesh", screens.NodeDetail(mapped[0]["protocol"], mapped[0]["id"]), top=9)
+    trace = next((item for item in engine.recent if item["kind"] == "traceroute"), None)
+    if trace is not None:
+        shot("packet-traceroute", screens.PacketDetail(trace), top=4)
     while engine.active.protocol != "meshtastic":
         engine.hop(1)
     engine.send("meshtastic", "LongFast", "Rolling through downtown, anyone copy?")

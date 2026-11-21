@@ -15,6 +15,8 @@ import hmac
 import math
 import struct
 
+from . import mt_apps
+
 
 class DecodeError(ValueError):
     pass
@@ -24,13 +26,19 @@ DEFAULT_MESHTASTIC_KEY = bytes.fromhex("d4f1bb3a20290759f0bcffabcf4e6901")
 PUBLIC_MESHCORE_KEY = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
 MT_CHANNELS = ("LongFast", "LongSlow", "LongTurbo", "LongMod", "LongModerate", "MediumFast",
                "MediumSlow", "ShortFast", "ShortSlow", "ShortTurbo")
-MT_PORTS = {1: "text", 3: "position", 4: "nodeinfo", 5: "routing", 6: "admin",
-            8: "waypoint", 10: "detection", 32: "reply", 34: "paxcounter",
-            64: "serial", 65: "store_forward", 66: "range_test", 67: "telemetry",
-            70: "traceroute", 71: "neighborinfo", 73: "map_report"}
+MT_PORTS = {1: "text", 2: "remote_hardware", 3: "position", 4: "nodeinfo", 5: "routing", 6: "admin",
+            7: "compressed_text", 8: "waypoint", 9: "audio", 10: "detection", 11: "alert",
+            12: "key_verification", 13: "remote_shell", 32: "reply", 33: "ip_tunnel", 34: "paxcounter",
+            35: "store_forward_plus", 36: "node_status", 37: "mesh_beacon", 38: "paging",
+            64: "serial", 65: "store_forward", 66: "range_test", 67: "telemetry", 68: "zps",
+            69: "simulator", 70: "traceroute", 71: "neighborinfo", 72: "atak", 73: "map_report",
+            74: "powerstress", 75: "lorawan_bridge", 76: "reticulum", 77: "cayenne", 78: "atak_v2",
+            79: "lora_ota", 112: "group_alarm", 256: "private", 257: "atak_forwarder"}
 MC_TYPES = {0: "request", 1: "response", 2: "text", 3: "ack", 4: "advert",
             5: "group_text", 6: "group_data", 7: "anon_request", 8: "path",
             9: "trace", 10: "multipart", 11: "control", 15: "raw_custom"}
+MC_TEXT_TYPES = {0: "plain", 1: "cli", 2: "signed", 3: "cli_command"}
+MC_NODE_TYPES = {1: "companion", 2: "repeater", 3: "room_server", 4: "sensor"}
 
 
 def _varint(data, pos):
@@ -192,7 +200,7 @@ def _mt_hash(name, key):
     return result
 
 
-def _decode_mt_data(plaintext):
+def _decode_mt_data(plaintext, header=None):
     fields = protobuf_fields(plaintext)
     port = _field(fields, 1, 0)
     body = _field(fields, 2, 2, b"")
@@ -204,56 +212,28 @@ def _decode_mt_data(plaintext):
     result["sender_bitfield_present"] = bitfield is not None
     if bitfield is not None:
         result["sender_bitfield"] = bitfield
-    if port == 1:
-        result["text"] = _text(body)
-    elif port == 4:
-        info = protobuf_fields(body)
-        for field, name, limit in ((1, "user_id", 16), (2, "name", 80), (3, "short_name", 16)):
-            raw = _field(info, field, 2)
-            if raw is not None:
-                result[name] = _text(raw, limit)
-        # Proto3 User.role defaults to CLIENT=0 when omitted. This applies only
-        # to decoded NodeInfo; other packet types do not imply a node role.
-        role = _field(info, 7, 0, 0)
-        result["role"] = role
-        roles = ("client", "client_mute", "router", "router_client", "repeater",
-                 "tracker", "sensor", "tak", "client_hidden", "lost_and_found",
-                 "tak_tracker", "router_late", "client_base")
-        if role < len(roles):
-            result["node_type"] = roles[role]
-        model = _field(info, 5, 0)
-        if model is not None:
-            result["hardware_model"] = model
-    elif port == 3:
-        info = protobuf_fields(body)
-        lat, lon = _field(info, 1, 5), _field(info, 2, 5)
-        if lat is not None and lon is not None:
-            result["node_position"] = _position(struct.unpack("<i", lat)[0] / 1e7,
-                                                  struct.unpack("<i", lon)[0] / 1e7)
-        altitude = _field(info, 3, 0)
-        if altitude is not None and "node_position" in result:
-            altitude = altitude - (1 << 64) if altitude >= 1 << 63 else altitude
-            if -1000 <= altitude <= 100000:
-                result["node_position"]["altitude_m"] = altitude
-        timestamp = _field(info, 4, 5)
-        if timestamp is not None:
-            result["advertised_timestamp"] = int.from_bytes(timestamp, "little")
-    elif port == 67:
-        telemetry = protobuf_fields(body)
-        device = _field(telemetry, 2, 2)
-        if device is not None:
-            values, metrics = protobuf_fields(device), {}
-            for field, name in ((1, "battery_percent"), (5, "uptime_seconds")):
-                value = _field(values, field, 0)
-                if value is not None:
-                    metrics[name] = value
-            for field, name in ((2, "voltage"), (3, "channel_utilization"), (4, "air_util_tx")):
-                value = _field(values, field, 5)
-                if value is not None:
-                    scalar = struct.unpack("<f", value)[0]
-                    if math.isfinite(scalar):
-                        metrics[name] = scalar
-            result["telemetry"] = metrics
+    data = dict(header or {})
+    for number, name in ((6, "request_id"), (7, "reply_id"), (8, "emoji")):
+        raw = _field(fields, number, 5)
+        if raw is not None and int.from_bytes(raw, "little"):
+            data[name] = result[name] = int.from_bytes(raw, "little")
+    if _field(fields, 3, 0):
+        result["want_response"] = True
+    if result.get("emoji") and result.get("reply_id"):
+        result["reaction_to"] = "%08x" % result["reply_id"]
+    if _field(fields, 10, 2):
+        result["signature_present"] = True
+    decoder = mt_apps.DECODERS.get(port)
+    if decoder is not None:
+        try:
+            result.update(decoder(body, data))
+        except (mt_apps.AppError, struct.error, UnicodeDecodeError) as exc:
+            if port in (1, 3, 4, 67):
+                # Core ports must parse; a failure means the wrong key or a corrupt frame.
+                raise DecodeError(str(exc)) from exc
+            result["app_decode_error"] = str(exc)
+    if not result.get("details"):
+        result.pop("details", None)
     return result
 
 
@@ -280,7 +260,9 @@ def _meshtastic(raw, keys, include_defaults=True):
             unavailable = True
             continue
         try:
-            payload = _decode_mt_data(plain)
+            payload = _decode_mt_data(plain, {"source_name": result["source_id"],
+                                               "destination_name": "^all" if destination == 0xFFFFFFFF
+                                               else result["destination_id"]})
         except (DecodeError, UnicodeDecodeError):
             continue
         result.update(payload)
@@ -331,7 +313,7 @@ def _meshcore(raw, keys, include_defaults=True):
         if not app:
             return result
         flags, cursor = app[0], 1
-        result["node_type"] = {1: "companion", 2: "repeater", 3: "room_server", 4: "sensor"}.get(flags & 15, "unknown")
+        result["node_type"] = MC_NODE_TYPES.get(flags & 15, "unknown")
         if flags & 0x10:
             if cursor + 8 > len(app):
                 raise DecodeError("Truncated advert location")
@@ -355,6 +337,14 @@ def _meshcore(raw, keys, include_defaults=True):
             result["destination_hash"] = payload[:1].hex()
             if prefix == 2:
                 result["source_hash"] = payload[1:2].hex()
+            if kind == 7:
+                # Anonymous requests (logins) carry the sender's full public key in clear.
+                result["sender_public_key"] = payload[1:33].hex()
+                result["details"] = [("Request", "anonymous login/request to %s" % payload[:1].hex()),
+                                     ("Sender key", payload[1:9].hex() + "…")]
+            else:
+                result["details"] = [("Direct", "%s → %s (end-to-end encrypted)" % (payload[1:2].hex(),
+                                                                                  payload[:1].hex()))]
             return result
         result["channel_hash"] = payload[0]
         cipher, mac = payload[3:], payload[1:3]
@@ -370,16 +360,78 @@ def _meshcore(raw, keys, include_defaults=True):
             result.update(channel_name=name, decode_status="decoded", payload_authenticated=True,
                           authentication="truncated_hmac_sha256", payload_hex=plain.hex())
             if kind == 5:
-                if len(plain) < 5 or plain[4] >> 2:
+                if len(plain) < 5:
                     raise DecodeError("Unsupported MeshCore group text")
+                txt_type, attempt = plain[4] >> 2, plain[4] & 3
+                body = plain[5:]
                 result["message_timestamp"] = int.from_bytes(plain[:4], "little")
-                result["text"] = _text(plain[5:].split(b"\x00", 1)[0])
+                result["text_type"] = MC_TEXT_TYPES.get(txt_type, "type_%d" % txt_type)
+                if attempt:
+                    result["attempt"] = attempt + 1
+                if txt_type == 2:
+                    if len(body) < 4:
+                        raise DecodeError("Truncated signed group text")
+                    result["sender_prefix"] = body[:4].hex()
+                    body = body[4:]
+                elif txt_type not in MC_TEXT_TYPES:
+                    raise DecodeError("Unsupported MeshCore group text")
+                result["text"] = _text(body.split(b"\x00", 1)[0])
+            else:
+                if len(plain) < 3:
+                    raise DecodeError("Truncated MeshCore group data")
+                data_type, size = int.from_bytes(plain[:2], "little"), plain[2]
+                result.update(data_type=data_type, data_hex=plain[3:3 + size].hex())
+                result["details"] = [("Group data", "type 0x%04x, %d bytes" % (data_type, size))]
             return result
         return result
-    if kind == 3 and len(payload) < 4:
-        raise DecodeError("Truncated MeshCore ACK")
-    if kind == 9 and len(payload) < 9:
-        raise DecodeError("Truncated MeshCore trace")
+    if kind == 3:
+        if len(payload) < 4:
+            raise DecodeError("Truncated MeshCore ACK")
+        result.update(ack_crc=payload[:4].hex(), details=[("ACK", "checksum " + payload[:4].hex())])
+    elif kind == 9:
+        if len(payload) < 9:
+            raise DecodeError("Truncated MeshCore trace")
+        flags = payload[8]
+        width = 1 << (flags & 3)
+        hops = payload[9:]
+        route = [hops[i:i + width].hex() for i in range(0, len(hops) - len(hops) % width, width)]
+        # A trace packet's path field collects one signed SNR*4 byte per hop so far.
+        snrs = [struct.unpack("b", bytes([b]))[0] / 4 for b in path]
+        result.update(trace_tag=payload[:4].hex(), trace_route=route, trace_snr=snrs)
+        line = " → ".join("%s%s" % (node, " (%+.1f dB)" % snrs[i] if i < len(snrs) else "")
+                          for i, node in enumerate(route)) or "(direct)"
+        result["details"] = [("Trace", line)]
+    elif kind == 10:
+        if len(payload) < 1:
+            raise DecodeError("Truncated MeshCore multipart")
+        remaining, inner = payload[0] >> 4, payload[0] & 15
+        result.update(multipart_remaining=remaining, multipart_type=MC_TYPES.get(inner, str(inner)))
+        result["details"] = [("Multipart", "%s, %d more to come" % (MC_TYPES.get(inner, str(inner)), remaining))]
+        if inner == 3 and len(payload) >= 5:
+            result["ack_crc"] = payload[1:5].hex()
+    elif kind == 11:
+        if len(payload) < 1:
+            raise DecodeError("Truncated MeshCore control")
+        sub = payload[0] >> 4
+        if sub == 8 and len(payload) >= 6:
+            wanted = [MC_NODE_TYPES[b] for b in MC_NODE_TYPES if payload[1] & (1 << b)]
+            result.update(control="discover_request", discover_tag=payload[2:6].hex(),
+                          discover_types=wanted)
+            result["details"] = [("Discover", "asking for " + (", ".join(wanted) or "any node"))]
+        elif sub == 9 and len(payload) >= 14:
+            node_type = MC_NODE_TYPES.get(payload[0] & 15, "unknown")
+            key = payload[6:38] if len(payload) >= 38 else payload[6:14]
+            snr = struct.unpack("b", payload[1:2])[0] / 4
+            result.update(control="discover_response", node_type=node_type, discover_tag=payload[2:6].hex(),
+                          discovered_key=key.hex(), reported_snr=snr)
+            if len(key) == 32:
+                # Same identity as the node's adverts; not signed here, so unverified.
+                result.update(source_id=key.hex(), identity_verified=False)
+            result["details"] = [("Discover", "%s answered, heard us at %+.1f dB" % (node_type, snr))]
+        else:
+            result["control"] = "subtype_%d" % sub
+    elif kind == 15:
+        result["details"] = [("Custom", "%d raw bytes (application defined)" % len(payload))]
     return result
 
 

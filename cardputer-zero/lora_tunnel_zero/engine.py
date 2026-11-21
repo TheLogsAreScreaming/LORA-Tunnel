@@ -416,13 +416,28 @@ class Engine:
                     if gps.get("valid"):
                         entry["best_fix"] = (gps["latitude"], gps["longitude"])
                 entry["profile"] = record["profile"].get("label")
-                for field in ("name", "short_name", "node_type", "hardware_model", "public_key"):
+                for field in ("name", "short_name", "node_type", "hardware_model", "hardware_name", "public_key",
+                              "is_licensed"):
                     if decoded.get(field) not in (None, ""):
                         entry[field] = decoded[field]
                 if "node_position" in decoded:
                     entry["position"] = decoded["node_position"]
+                if decoded.get("position_info"):
+                    entry["position_info"] = decoded["position_info"]
                 if decoded.get("telemetry"):
-                    entry["telemetry"] = decoded["telemetry"]
+                    entry.setdefault("telemetry", {}).update(decoded["telemetry"])
+                if decoded.get("map_report"):
+                    entry["map_report"] = decoded["map_report"]
+                if "neighbors" in decoded:
+                    entry["neighbors"] = decoded["neighbors"]
+                if decoded.get("paxcounter"):
+                    entry["paxcounter"] = decoded["paxcounter"]
+                if decoded.get("traceroute_kind") == "reply" and decoded.get("route") is not None:
+                    entry["last_route"] = decoded["route"]
+                apps = entry.setdefault("apps", {})
+                app = decoded.get("port_name") or decoded.get("payload_name")
+                if app:
+                    apps[app] = apps.get(app, 0) + 1
                 if "hop_start" in decoded and decoded.get("hop_start"):
                     entry["hops"] = decoded["hop_start"] - decoded.get("hop_limit", 0)
                 elif "hop_count" in decoded:

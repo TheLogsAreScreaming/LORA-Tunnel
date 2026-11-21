@@ -18,6 +18,11 @@ struct Counters {std::atomic<unsigned> storage_errors{0},log_drops{0};} counters
 bool shutdownHadSession=false;unsigned shutdownAt=0,shutdownErrors=0,shutdownDrops=0;
 bool shutdownPending=false,quietActive=false,startAfterUpload=false,ready=true,stopping=false;
 bool configScratchStartup=false;
+bool captureStorageFailed=false;
+enum class MessageOwner {Off,Pausing,Active,Restoring,Fault};
+MessageOwner messageOwner=MessageOwner::Off;
+bool shutdownAfterMessages=false;unsigned messageStops=0;
+bool stopMessages(){++messageStops;return true;}
 bool uploadBusy=false,bleReady=true,storage=true,loggerFree=true,cancelled=false,acceptMarker=true;
 std::atomic<bool> capturing{false};std::atomic<unsigned> sessionId{0};unsigned totals[3]{},reconTotal=0;
 unsigned meshDecoded=0,meshUnknown=0,coverageReads=0;

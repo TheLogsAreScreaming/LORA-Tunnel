@@ -102,14 +102,47 @@ class GnssTests(unittest.TestCase):
 class KeyTests(unittest.TestCase):
     def test_cardputer_arrow_aliases_and_text_mode(self):
         keys = EvdevInput(paths=[])
-        self.assertEqual(keys.translate(39, 1).name, "UP")       # ;
-        self.assertEqual(keys.translate(52, 1).name, "DOWN")     # .
-        self.assertEqual(keys.translate(41, 1).name, "ESC")      # `
+        self.assertEqual(keys.translate(39, 1, builtin=False).name, "UP")       # ; on a USB keyboard
+        self.assertEqual(keys.translate(52, 1, builtin=False).name, "DOWN")     # .
+        self.assertEqual(keys.translate(41, 1, builtin=False).name, "ESC")      # `
+        self.assertEqual(keys.translate(79, 1).name, "UP")                      # Sym ; on the built-in keyboard
+        self.assertEqual(keys.translate(91, 1).name, "DOWN")                    # Sym .
+        self.assertEqual(keys.translate(69, 1).name, "ESC")                     # Sym `
         keys.text_mode = True
-        self.assertEqual(keys.translate(39, 1).char, ";")
+        self.assertEqual(keys.translate(39, 1, builtin=False).char, ";")
+        self.assertEqual(keys.translate(79, 1).char, ";")
         keys.translate(42, 1)                                     # shift down
         self.assertEqual(keys.translate(30, 1).char, "A")
         self.assertIsNone(keys.translate(30, 0))                  # releases ignored
+
+    def test_builtin_sym_layer_types_every_symbol(self):
+        from lora_tunnel_zero.ui.keys import SYM_CHARS
+        keys = EvdevInput(paths=[])
+        keys.text_mode = True
+        typed = "".join(keys.translate(code, 1).char for code in sorted(SYM_CHARS))
+        self.assertEqual(sorted(typed), sorted("!@#$%^&*()~`_-+=[]{};:'\"<>\\|,./?"))
+        self.assertEqual(keys.translate(70, 1).char, "_")
+        self.assertEqual(keys.translate(71, 1).char, "-")
+        keys.translate(42, 1)                                     # Shift does not change a symbol
+        self.assertEqual(keys.translate(70, 1).char, "_")
+        self.assertEqual(keys.translate(12, 1, builtin=False).char, "_")      # USB keyboard Shift + -
+
+    def test_system_keymap_file_overrides_the_default(self):
+        from lora_tunnel_zero.ui import keys as keymod
+        work = Path(tempfile.mkdtemp())
+        path = work / "map"
+        path.write_text("# comment\nkeycode 70 = underscore\nkeycode 71 = minus # dash\nkeycode 99 = U00E9\nbogus\n")
+        table = keymod.sym_chars(path)
+        self.assertEqual(table, {70: "_", 71: "-", 99: "\u00e9"})
+        self.assertEqual(keymod.sym_chars(work / "missing"), keymod.SYM_CHARS)
+        path.write_text("nothing useful\n")
+        self.assertEqual(keymod.sym_chars(path), keymod.SYM_CHARS)
+
+    def test_text_field_accepts_api_key_symbols(self):
+        keys = EvdevInput(paths=[])
+        keys.text_mode = True
+        seq = [(32, "d"), (70, "_"), (2, "1"), (71, "-"), (30, "a")]
+        self.assertEqual("".join(keys.translate(c, 1).char for c, _ in seq), "d_1-a")
 
 
 class UITests(unittest.TestCase):

@@ -1,6 +1,6 @@
 """LORA Tunnel for M5Stack CardputerZero: LoRa mesh wardriving and decoding."""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 APP_NAME = "LORA Tunnel"
 
 

@@ -110,7 +110,7 @@ Open the **App Store** on the CardputerZero, enter share code **LORA**, and inst
 Connect the CardputerZero to Wi-Fi. Open a terminal on it, or SSH in from a computer (`ssh pi@<device-ip>`; run `hostname -I` on the device to find its address). Then paste:
 
 ```sh
-curl -fL -o /tmp/lora-tunnel.deb https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/cardputer-zero-v1.1.0/lora-tunnel-cardputer-zero.deb && sudo apt install -y /tmp/lora-tunnel.deb && sudo reboot
+curl -fL -o /tmp/lora-tunnel.deb https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/cardputer-zero-v1.1.1/lora-tunnel-cardputer-zero.deb && sudo apt install -y /tmp/lora-tunnel.deb && sudo reboot
 ```
 
 It downloads the release, installs it with its few Python dependencies, and restarts. LORA Tunnel then appears in APPLaunch. To update later, run the same command with the newer version number. All releases are on the [releases page](https://github.com/valleytechsolutions/LORA-Tunnel/releases).
@@ -156,7 +156,7 @@ To publish to the CardputerZero store with M5Stack's [czdev](https://github.com/
 ```sh
 czdev login
 cd cardputer-zero
-czdev publish --deb build/lora-tunnel_1.1.0_all.deb
+czdev publish --deb build/lora-tunnel_1.1.1_all.deb
 ```
 
 To publish a GitHub release for the one-command install, bump `version` in `app-builder.json` and `lora_tunnel_zero/__init__.py`. Then create a release tagged `cardputer-zero-v<version>`. The **CardputerZero release** workflow tests the app, builds the `.deb` and attaches it to the release.

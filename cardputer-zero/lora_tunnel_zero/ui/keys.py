@@ -3,6 +3,12 @@
 The CardputerZero's TCA8418 keyboard appears as an input device. As on the
 Cardputer ADV, ; . , / double as Up, Down, Left, Right, and ` acts as Escape.
 Text fields read characters directly instead of the arrow aliases.
+
+The built-in keyboard's driver (tca8418_keypad_m5stack) sends its own codes
+for the symbols typed with Sym, for example 70 for "_" and 71 for "-". Several
+of those codes collide with standard PC keys (51 is "&" here, "," on a PC), so
+the symbol table applies only to the built-in keyboard. It is the same table
+the CardputerZero launcher uses, and the system's keymap file overrides it.
 """
 
 import os
@@ -28,6 +34,66 @@ CHARS = {
     44: "zZ", 45: "xX", 46: "cC", 47: "vV", 48: "bB", 49: "nN", 50: "mM", 51: ",<", 52: ".>",
     53: "/?",
 }
+# Built-in keyboard Sym codes (CardputerZero launcher cp0_keyboard_keymap.c).
+SYM_CHARS = {
+    26: "!", 27: "@", 39: "#", 40: "$", 41: "%", 43: "^", 51: "&", 52: "*", 53: "(", 94: ")",
+    55: "~", 69: "`", 70: "_", 71: "-", 72: "+", 73: "=", 74: "[", 75: "]", 76: "{", 77: "}",
+    79: ";", 80: ":", 81: "'", 82: '"', 83: "<", 85: ">", 86: "\\", 89: "|", 90: ",", 91: ".",
+    92: "/", 93: "?",
+}
+SYSTEM_KEYMAP = Path("/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map")
+# X keysym names for printable ASCII, as used in the system keymap file.
+KEYSYMS = {
+    "space": " ", "exclam": "!", "quotedbl": '"', "numbersign": "#", "dollar": "$",
+    "percent": "%", "ampersand": "&", "apostrophe": "'", "quoteright": "'",
+    "parenleft": "(", "parenright": ")", "asterisk": "*", "plus": "+", "comma": ",",
+    "minus": "-", "period": ".", "slash": "/", "colon": ":", "semicolon": ";", "less": "<",
+    "equal": "=", "greater": ">", "question": "?", "at": "@", "bracketleft": "[",
+    "backslash": "\\", "bracketright": "]", "asciicircum": "^", "underscore": "_",
+    "grave": "`", "quoteleft": "`", "braceleft": "{", "bar": "|", "braceright": "}",
+    "asciitilde": "~",
+}
+for _n, _d in enumerate("0123456789"):
+    KEYSYMS[_d] = _d
+for _c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    KEYSYMS[_c] = _c
+
+
+def parse_keymap(text):
+    """Code to character from lines like "keycode 70 = underscore"; None if empty."""
+    table = {}
+    for line in text.splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) >= 4 and parts[0] == "keycode" and parts[2] == "=" and parts[1].isdigit():
+            char = KEYSYMS.get(parts[3])
+            if char is None and parts[3].startswith("U") and len(parts[3]) == 5:
+                try:
+                    char = chr(int(parts[3][1:], 16))
+                except ValueError:
+                    char = None
+            if char:
+                table[int(parts[1])] = char
+    return table or None
+
+
+def sym_chars(path=SYSTEM_KEYMAP):
+    """The built-in keyboard's symbol table: the system keymap file, else the default."""
+    try:
+        return parse_keymap(Path(path).read_text()) or dict(SYM_CHARS)
+    except (OSError, UnicodeDecodeError):
+        return dict(SYM_CHARS)
+
+
+def is_builtin(path):
+    """True unless the input device is on USB or Bluetooth (an external keyboard)."""
+    name = os.path.basename(os.path.realpath(path))
+    try:
+        bus = Path("/sys/class/input/%s/device/id/bustype" % name).read_text().strip()
+    except OSError:
+        return True
+    return int(bus, 16) not in (0x03, 0x05)
+
+
 ARROW_ALIASES = {";": "UP", ".": "DOWN", ",": "LEFT", "/": "RIGHT", "`": "ESC"}
 
 
@@ -72,11 +138,16 @@ def find_keyboards():
 class EvdevInput:
     def __init__(self, paths=None):
         self.devices = []
+        self.builtin = set()
+        self.sym = sym_chars()
         for path in paths or find_keyboards():
             try:
-                self.devices.append(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
             except OSError:
                 continue
+            self.devices.append(fd)
+            if is_builtin(path):
+                self.builtin.add(fd)
         self.shift = self.fn = self.ctrl = False
         self.text_mode = False
 
@@ -96,12 +167,12 @@ class EvdevInput:
                 _, _, kind, code, value = EVENT.unpack_from(data, offset)
                 if kind != EV_KEY:
                     continue
-                key = self.translate(code, value)
+                key = self.translate(code, value, fd in self.builtin)
                 if key is not None:
                     keys.append(key)
         return keys
 
-    def translate(self, code, value):
+    def translate(self, code, value, builtin=True):
         name = CODES.get(code)
         if name in ("SHIFT", "FN", "CTRL"):
             setattr(self, name.lower(), value != 0)
@@ -111,8 +182,13 @@ class EvdevInput:
         if value == 0:
             return None
         repeat = value == 2
-        if code in CHARS:
+        if builtin and code in self.sym:
+            char = self.sym[code]
+        elif code in CHARS:
             char = CHARS[code][1 if self.shift else 0]
+        else:
+            char = None
+        if char:
             if not self.text_mode and (self.fn or not self.shift) and char in ARROW_ALIASES and not self.ctrl:
                 return Key(ARROW_ALIASES[char], char, repeat)
             return Key(char.upper() if char.isalpha() else char, char, repeat)

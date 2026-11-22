@@ -42,7 +42,8 @@ def main(argv=None):
     keyboard = EvdevInput()
     engine = Engine(cfg)
     engine.start_gps()
-    app = App(display, keyboard, engine, cfg, splash=not args.no_splash)
+    app = App(display, keyboard, engine, cfg, splash=not args.no_splash,
+              check_updates_on_start=cfg.get("backend") != "demo")
 
     def stop(*_):
         app.running = False

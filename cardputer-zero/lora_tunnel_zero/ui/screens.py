@@ -8,7 +8,7 @@ from datetime import datetime
 import shutil
 import time
 
-from .. import __version__, config as configuration, mesh_tx, profiles, recon
+from .. import __version__, config as configuration, mesh_tx, profiles, recon, updates
 from ..store import list_sessions
 from . import icons
 from .gfx import (AMBER, BG, CONTENT_BOTTOM, CONTENT_TOP, CYAN, FAINT, GREEN, GREEN_DIM, GREEN_INK,
@@ -988,6 +988,9 @@ class Settings(Screen, ListMixin):
             ("recon_display_min", "Show from", cfg.get("recon_display_min", "low").title()),
             ("recon_alert_min", "Alert from", cfg.get("recon_alert_min", "medium").title()),
             ("recon_sound", "Alert sound", on("recon_sound")),
+            (None, "UPDATES", ""),
+            ("updates", "Check for updates", update_label(app)),
+            ("update_check_start", "Check when opened", on("update_check_start")),
             (None, "", ""),
             ("about", "About", "v" + __version__),
         ]
@@ -1040,6 +1043,8 @@ class Settings(Screen, ListMixin):
             name = items[self.index][0]
             if name == "about":
                 app.push(About())
+            elif name == "updates":
+                app.push(Updates())
             elif app.engine.state == "capturing" and name in self.RADIO_KEYS:
                 app.toast("Stop capture to change radio settings", AMBER)
             elif name in ("meshtastic_keys", "meshcore_keys"):
@@ -1160,6 +1165,63 @@ class About(Screen):
         vts = image("vts.png", (28, 32))
         c.paste(vts, (W - 40, CONTENT_BOTTOM - 36))
         c.text_right(W - 46, CONTENT_BOTTOM - 22, "Valleytech Solutions", font("bold", 9), MUTED)
+
+
+def update_label(app):
+    if app.updates.checking:
+        return "Checking..."
+    status = updates.summary(app.updates.result)[0]
+    if status == "store":
+        return "v%s in Store" % app.updates.result["store"]
+    if status == "github":
+        return "v%s on GitHub" % app.updates.result["github"]
+    if status == "current":
+        return "Up to date"
+    if status == "error":
+        return "Couldn't check"
+    return "v" + __version__
+
+
+class Updates(Screen):
+    title = "UPDATES"
+    refresh = 0.5
+
+    def __init__(self):
+        self.started = False
+
+    def hints(self, app):
+        return [("Enter", "Check again"), ("Esc", "Back")]
+
+    def render(self, c, app):
+        if not self.started:
+            self.started = True
+            app.updates.start()
+        mark = image("radio-mark.png", (30, 50))
+        c.paste(mark, (14, TOP + 4))
+        c.text((54, TOP + 2), "LORA Tunnel v" + __version__, font("bold", 11), TEXT)
+        if app.updates.checking:
+            c.text((54, TOP + 20), "Checking the Store and GitHub...", font("ui", 10), MUTED)
+            return
+        status, headline, lines = updates.summary(app.updates.result)
+        color = {"store": CYAN, "github": CYAN, "current": GREEN, "error": AMBER}.get(status, MUTED)
+        c.text((54, TOP + 18), headline, font("bold", 12), color)
+        for i, line in enumerate(lines):
+            c.text((54, TOP + 38 + i * 13), line, font("ui", 9), TEXT, width=W - 62)
+        result = app.updates.result
+        if result:
+            when = datetime.fromtimestamp(result["checked_at"]).strftime("%H:%M")
+            parts = ["Checked " + when]
+            if result.get("store_ok"):
+                parts.append("Store: " + ("v" + result["store"] if result.get("store") else "not listed"))
+            if result.get("github_ok"):
+                parts.append("GitHub: " + ("v" + result["github"] if result.get("github") else "none"))
+            c.text((14, CONTENT_BOTTOM - 13), "  ·  ".join(parts), font("mono", 8), FAINT, width=W - 28)
+
+    def handle(self, key, app):
+        if key == "ENTER":
+            app.updates.start()
+            return True
+        return super().handle(key, app)
 
 
 # ---------------------------------------------------------------- modals

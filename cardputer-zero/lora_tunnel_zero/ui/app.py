@@ -10,8 +10,9 @@ from .. import RadioError, config as configuration, mesh_tx, profiles
 from ..export import export_recon, export_session
 from ..recon_scan import Recon
 from ..store import list_sessions
+from ..updates import UpdateChecker
 from . import icons, recon_screens, screens
-from .gfx import (AMBER, BG, FAINT, FOOTER_H, GREEN, H, LINE, MUTED, RED, STATUS_H, SURFACE, TEXT, W,
+from .gfx import (AMBER, BG, CYAN, FAINT, FOOTER_H, GREEN, H, LINE, MUTED, RED, STATUS_H, SURFACE, TEXT, W,
                   Canvas, clock, font, image)
 
 
@@ -23,7 +24,8 @@ def make_recon(cfg, gps):
 
 
 class App:
-    def __init__(self, display, keyboard, engine, cfg, config_path=None, data_root=None, splash=True, recon=None):
+    def __init__(self, display, keyboard, engine, cfg, config_path=None, data_root=None, splash=True, recon=None,
+                 updates=None, check_updates_on_start=False):
         self.display, self.keyboard, self.engine = display, keyboard, engine
         self.cfg = dict(cfg)
         self.recon = recon or make_recon(self.cfg, engine.gps)
@@ -37,6 +39,8 @@ class App:
         self._sessions, self._sessions_at = [], 0.0
         self.dirty = True
         self._first_run_checked = False
+        self.updates = updates or UpdateChecker()
+        self._check_updates_on_start = check_updates_on_start
 
     # -- navigation ------------------------------------------------------
     @property
@@ -282,6 +286,8 @@ class App:
             if self.recon is not None and self.recon.state == "running" and name == "wigle_random_ble":
                 return self.toast("Stop scanning to change the WiGLE log", AMBER)
             return self.save_config(**{name: not cfg.get(name, default)})
+        elif name == "update_check_start":
+            return self.save_config(update_check_start=not cfg.get(name, True))
         elif name in ("recon_wifi", "recon_ble", "recon_sound"):
             if self.recon.state == "running" and name != "recon_sound":
                 return self.toast("Stop Recon to change scanners", AMBER)
@@ -429,15 +435,25 @@ class App:
         if self._first_run_checked or isinstance(self.screen, screens.Splash):
             return
         self._first_run_checked = True
+        if self._check_updates_on_start and self.cfg.get("update_check_start", True):
+            self.updates.start()
         if not self.cfg.get("region"):
             self.pick_region()
             self.toast("Choose the LoRa region you're in", AMBER, 4)
+
+    def announce_update(self):
+        if self.updates.checking or self.updates.result is None:
+            return
+        version = self.updates.take_announcement()
+        if version and not isinstance(self.screen, screens.Updates):
+            self.toast("Update %s available  ·  Settings › Updates" % version, CYAN, 6)
 
     def step(self, timeout=0.05):
         screen = self.screen
         if isinstance(screen, screens.Splash) and screen.done():
             self.pop()
         self.first_run()
+        self.announce_update()
         self.keyboard.text_mode = getattr(self.screen, "text_mode", False)
         for key in self.keyboard.poll(timeout):
             self.screen.handle(key, self)

@@ -110,7 +110,7 @@ Open the **App Store** on the CardputerZero, enter share code **LORA**, and inst
 Connect the CardputerZero to Wi-Fi. Open a terminal on it, or SSH in from a computer (`ssh pi@<device-ip>`; run `hostname -I` on the device to find its address). Then paste:
 
 ```sh
-curl -fL -o /tmp/lora-tunnel.deb https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/cardputer-zero-v1.1.1/lora-tunnel-cardputer-zero.deb && sudo apt install -y /tmp/lora-tunnel.deb && sudo reboot
+curl -fL -o /tmp/lora-tunnel.deb https://github.com/valleytechsolutions/LORA-Tunnel/releases/download/cardputer-zero-v1.2.0/lora-tunnel-cardputer-zero.deb && sudo apt install -y /tmp/lora-tunnel.deb && sudo reboot
 ```
 
 It downloads the release, installs it with its few Python dependencies, and restarts. LORA Tunnel then appears in APPLaunch. To update later, run the same command with the newer version number. All releases are on the [releases page](https://github.com/valleytechsolutions/LORA-Tunnel/releases).
@@ -129,7 +129,16 @@ cd /tmp && curl -fL -o lora.tgz https://github.com/valleytechsolutions/LORA-Tunn
 - **Bluetooth says "switched off":** run `sudo rfkill unblock bluetooth` once. The setting is remembered.
 - **Remove the app:** `sudo apt remove lora-tunnel` removes only LORA Tunnel. Your saved sessions stay in `~/LoRaTunnel`.
 
-The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups. It also installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. That's why one reboot is needed after the first install. The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups and installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. Log out and back in, or reboot, once after the first install so the group changes take effect. The app runs as your normal user and ships no root service.
+The package adds login users to the `video input spi gpio i2c dialout bluetooth netdev` groups. It also installs a `tmpfiles.d` rule so the `gpio` group can switch the cap's 5 V rail. That's why one reboot is needed after the first install. The app runs as your normal user and ships no root service.
+
+### Updating
+
+LORA Tunnel checks for a newer version when it opens (turn this off in **Settings → Updates → Check when opened**). You can also check any time in **Settings → Updates → Check for updates**. It looks at the CardputerZero App Store and at this repository's releases, and only reads version numbers; it never downloads or installs anything by itself.
+
+- **Installed from the App Store:** open the **Store**. LORA Tunnel shows that an update is available, and key **7** updates it.
+- **Installed with the one-line command:** run the command again with the newer version number from the [releases page](https://github.com/valleytechsolutions/LORA-Tunnel/releases).
+
+Updating keeps your settings, keys and saved sessions.
 
 ## Settings and channel keys
 
@@ -156,7 +165,7 @@ To publish to the CardputerZero store with M5Stack's [czdev](https://github.com/
 ```sh
 czdev login
 cd cardputer-zero
-czdev publish --deb build/lora-tunnel_1.1.1_all.deb
+czdev publish --deb build/lora-tunnel_1.2.0_all.deb
 ```
 
 To publish a GitHub release for the one-command install, bump `version` in `app-builder.json` and `lora_tunnel_zero/__init__.py`. Then create a release tagged `cardputer-zero-v<version>`. The **CardputerZero release** workflow tests the app, builds the `.deb` and attaches it to the release.

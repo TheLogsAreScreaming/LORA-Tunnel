@@ -42,6 +42,7 @@ DEFAULTS = {
     # Wi-Fi/BLE wardriving runs with LoRa capture; WiGLE CSV skips random BLE addresses by default
     "wardrive_wifi_ble": True,
     "wigle_random_ble": False,
+    "update_check_start": True,
     # Recon
     "recon_wifi": True,
     "recon_ble": True,

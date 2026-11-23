@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build and attach to, for example cardputer-zero-v1.2.0'
+        description: 'Release tag to build and attach to, for example cardputer-zero-v1.2.0. If the release does not exist yet, it is created from the branch this runs on.'
         required: true
 
 permissions:
@@ -30,7 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          # A manual run builds the branch it was started on; the release and tag are made from it.
+          ref: ${{ github.event.release.tag_name || github.ref }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.11'
@@ -54,7 +55,7 @@ jobs:
       - name: Create or update the GitHub release
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "LORA Tunnel for CardputerZero ${TAG#cardputer-zero-v}" \
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "LORA Tunnel for CardputerZero ${TAG#cardputer-zero-v}" \
               --notes-file ../cardputer-zero/RELEASE_NOTES.md --latest=false
           fi
           gh release upload "$TAG" build/*.deb build/SHA256SUMS --clobber
